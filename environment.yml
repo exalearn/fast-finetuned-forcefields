@@ -1,0 +1,19 @@
+# Environment that uses CPU versions of all codes
+name: fastforce
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python==3.10.*
+  - ase==3.22.*
+  - pandas==1.*
+  - pydantic
+  - pymongo
+  - tqdm
+  - jupyterlab
+  - matplotlib
+  - pytest
+  - pip
+  - pip:
+      - colmena>=0.3.0
+      - globus-cli
