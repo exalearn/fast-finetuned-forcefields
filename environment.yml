@@ -5,7 +5,6 @@ channels:
   - conda-forge
 dependencies:
   - python==3.10.*
-  - ase==3.22.*
   - pandas==1.*
   - pydantic
   - pymongo
@@ -15,5 +14,6 @@ dependencies:
   - pytest
   - pip
   - pip:
+      - git+https://gitlab.com/WardLT/ase.git@twostep_nwc
       - colmena>=0.3.0
       - globus-cli
