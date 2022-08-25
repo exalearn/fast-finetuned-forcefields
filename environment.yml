@@ -12,6 +12,8 @@ dependencies:
   - tqdm
   - jupyterlab
   - matplotlib
+  - tensorboard
+  - pyg
   - pytest
   - pip
   - pip:
