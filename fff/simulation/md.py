@@ -30,7 +30,7 @@ def run_dynamics(atoms: Atoms, calc: Calculator, timestep: float, steps: int,
     """
 
     # Set the calculator
-    atoms.set_calculator(calc)
+    atoms.calc = calc
 
     # Define the dynamics
     dyn = VelocityVerlet(atoms, timestep=timestep * units.fs)

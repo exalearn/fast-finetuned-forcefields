@@ -25,7 +25,7 @@ def run_calculator(atoms: Atoms, calc: Calculator, temp_path: Optional[str] = No
 
         # Run the calculation
         start_time = time.perf_counter()
-        atoms.set_calculator(calc)
+        atoms.calc = calc
         atoms.get_forces()
         run_time = time.perf_counter() - start_time
 
