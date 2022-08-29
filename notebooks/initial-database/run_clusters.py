@@ -27,6 +27,7 @@ import parsl
 cores_per_node = 68
 memory_per_node = 90  # In GB
 scratch_path = '/global/cscratch1/sd/wardlt/nwchem-bench/'
+disk_space = 1700 # In GB
 
 
 @parsl.python_app
@@ -42,11 +43,15 @@ def run_nwchem(atoms: ase.Atoms, calc: NWChem, temp_path: Optional[str] = None) 
     """
     from tempfile import TemporaryDirectory
     import time
+    import os
 
-    with TemporaryDirectory(dir=temp_path, prefix='nwc') as dir:
+    with TemporaryDirectory(dir=temp_path, prefix='nwc') as temp_dir:
+        # Execute from the temp so that the nwchem.nwi doesn't overwrite another's
+        os.chdir(temp_dir)
+        
         # Update the scratch directory
-        calc.scratch = str(dir)
-        calc.perm = str(dir)
+        calc.scratch = str(temp_dir)
+        calc.perm = str(temp_dir)
 
         # Run the calculation
         start_time = time.perf_counter()
@@ -74,10 +79,11 @@ def generate_structures() -> Iterable[Tuple[str, ase.Atoms]]:
 if __name__ == "__main__":
     # Make the argument parser
     parser = ArgumentParser()
-    parser.add_argument('--ranks-per-node', default=64, help='Number of ranks per node', type=int)
-    parser.add_argument('--num-nodes', default=1, help='Number of nodes on which to run', type=int)
+    parser.add_argument('--num-nodes', default=4, help='Number of nodes for each NWChem computation', type=int)
+    parser.add_argument('--num-parallel', default=1, help='Number of NWChem computations to run in parallel', type=int)
     parser.add_argument('--basis', default='aug-cc-pvdz', help='Basis set to use for all atoms')
     parser.add_argument('--max-to-run', default=None, type=int, help='Maximum number of tasks to run')
+    parser.add_argument('--temp-dir', default=None, help='Where to store the temporary files')
     args = parser.parse_args()
 
     # Make a generator over structures to read
@@ -85,6 +91,10 @@ if __name__ == "__main__":
 
     # Make the NWChem calculator
     ranks_per_node = cores_per_node
+    integral_caching = {
+        'memsize': int(0.5 * memory_per_node / ranks_per_node * 1e9 // 8),  # To 64-bit words (GB -> bytes),
+        'filesize': int(disk_space // args.num_parallel * 1e9 // 8)  # Shared amongst parallel workers
+    }
     calc = nwchem = NWChem(
         memory=f'{memory_per_node / ranks_per_node:.1f} gb',
         basis={'*': args.basis},
@@ -98,9 +108,16 @@ if __name__ == "__main__":
             'cphf:thresh': '6.49d-5',
             'int:acc_std': '1d-16'
         },
-        scf={'maxiter': 99, 'tol2e': '1d-15'},
+        scf={
+            'maxiter': 99,
+            'tol2e': '1d-15',
+            'semidirect': integral_caching,
+        },
         mp2={'freeze': 'atomic'},
         initwfc={
+            'scf': {
+                'semidirect': integral_caching
+            },
             'dft': {
                 'xc': 'hfexch',
                 # 'convergence': {  # TODO (wardlt): Explore if there is a better value for the convergence
@@ -118,8 +135,9 @@ if __name__ == "__main__":
         },
         # Note: Parsl sets --ntasks-per-node=1 in #SBATCH. For some reason, --ntasks in srun overrides it
         command=(f'srun -N {args.num_nodes} '
-                 f'--ntasks={ranks_per_node * cores_per_node} '
+                 f'--ntasks={ranks_per_node * args.num_nodes} '
                  f'--export=ALL,OMP_NUM_THREADS={1} '
+                 f'--ntasks-per-node={ranks_per_node} '
                  '--cpu-bind=cores shifter nwchem PREFIX.nwi > PREFIX.nwo'),
     )
 
@@ -129,13 +147,14 @@ if __name__ == "__main__":
         retries=1,  # Will restart a job if it fails for any reason
         executors=[HighThroughputExecutor(
             label='launch_from_mpi_nodes',
-            max_workers=1,
+            max_workers=args.num_parallel,
+            cores_per_worker=1e-6,
             provider=SlurmProvider(
                 partition='regular',
                 account='m1513',
                 launcher=SimpleLauncher(),
-                walltime='36:00:00',
-                nodes_per_block=args.num_nodes,  # Number of nodes per job
+                walltime='12:00:00',
+                nodes_per_block=args.num_nodes * args.num_parallel,
                 init_blocks=0,
                 min_blocks=1,
                 max_blocks=1,  # Maximum number of jobs
@@ -145,7 +164,7 @@ module load python
 conda activate /global/project/projectdirs/m1513/lward/hydronet/env
 
 module swap craype-{{${{CRAY_CPU_TARGET}},mic-knl}}
-export OMP_NUM_THREADS={68 // args.ranks_per_node}
+export OMP_NUM_THREADS=1
 export MPICH_GNI_MAX_EAGER_MSG_SIZE=131026
 export MPICH_GNI_NUM_BUFS=80
 export MPICH_GNI_NDREG_MAXSIZE=16777216
@@ -163,42 +182,46 @@ pwd
     )
     parsl.load(config)
 
-    # Open the ASE database
-    print(f'Submitting from database...')
+    print(f'Submitting from the ZIP file...')
+    n_skipped = 0
     with connect('initial.db', type='db') as db:
         # Submit structures to Pars
         futures = []
         for filename, atoms in generate_structures():
             # Store some tracking information
-            atoms.info['filename'] = filename  # Pass the file name along with the calculation
+            atoms.info['filename'] = filename
             atoms.info['basis'] = args.basis
+            atoms.info['num_nodes'] = args.num_nodes
+            atoms.info['num_parallel'] = args.num_parallel
 
             # Skip if this structure is already in the database
             if db.count(filename=filename, basis=args.basis) > 0:
+                n_skipped += 1
                 continue
 
             # Submit the calculation to run
-            future = run_nwchem(atoms, calc, temp_path=None)
+            future = run_nwchem(atoms, calc, temp_path=scratch_path)
             futures.append(future)
 
             # Check if the total
             if args.max_to_run is not None and len(futures) >= args.max_to_run:
                 break
-        print(f'Submitted {len(futures)}')
+    print(f'Submitted {len(futures)}. {n_skipped} were already complete')
 
-        # Loop over the futures and store them if the complete
-        n_failures = 0
-        for future in tqdm(as_completed(futures), total=len(futures), desc='completed'):
-            # Get the result
-            future: AppFuture = future
-            future.exception()
-            if future.exception() is not None:
-                print(f'Failure for {future.task_def["args"].info["filename"]}')
-                n_failures += 1
-                continue
-            atoms, runtime = future.result()
+    # Loop over the futures and store them if the complete
+    n_failures = 0
+    for future in tqdm(as_completed(futures), total=len(futures), desc='completed'):
+        # Get the result
+        future: AppFuture = future
+        exc = future.exception()
+        if exc is not None:
+            print(f'Failure for {future.task_def["args"][0].info["filename"]}. {str(exc)}')
+            n_failures += 1
+            continue
+        atoms, runtime = future.result()
 
-            # Store it
+        # Store it (open a new connect each time so we ensure results are written
+        with connect('initial.db', type='db') as db:
             db.write(atoms, **atoms.info, runtime=runtime)
-        if n_failures > 0:
-            print(f'Total failure count {n_failures}')
+    if n_failures > 0:
+        print(f'Total failure count {n_failures}')
