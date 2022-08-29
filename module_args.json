@@ -1,0 +1,20 @@
+{
+    "al_threshold": 10,
+    "create_splits": false,
+    "splitdir": "./data/splits/",
+    "energy_coeff": 0.05,
+    "mae_std_from_val": true,
+    "max_to_add": 0.1,
+    "n_epochs_initial": 5,
+    "n_epochs_al": 3,
+    "n_epochs_end": 5,
+    "n_al_iters": 5,
+    "save_models": true,
+    "start_lr": 0.0001,
+    "datasets": ["min", "nonmin"],
+    "n_train": [230, 230],
+    "n_to_examine": [20, 25],
+    "start_model": "./pretrained_models/2-7milweights",
+    "load_state": true,
+    "clip_value": 200.0
+}
