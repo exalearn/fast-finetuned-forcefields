@@ -7,6 +7,7 @@ from ase.build import bulk
 from pytest import fixture
 
 
+from fff.simulation import run_calculator
 from fff.simulation.md import run_dynamics
 
 
@@ -20,8 +21,14 @@ def atoms():
     return bulk('Cu') * [4, 4, 4]
 
 
-def test_md(calc, atoms):
+def test_single(calc, atoms):
+    atoms, runtime = run_calculator(atoms, calc)
+    assert runtime > 0
     assert len(atoms) == 64
+    assert 'forces' in atoms.calc.results  # Ensure that forces have been computed
+
+
+def test_md(calc, atoms):
     traj = run_dynamics(atoms, calc, 1, 1000, log_interval=100)
     assert len(traj) == 11
 

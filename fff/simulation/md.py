@@ -1,12 +1,11 @@
 """Sampling structures using molecular dynamics"""
-
+import os
 from tempfile import TemporaryDirectory
 from typing import Optional, List
 from pathlib import Path
 import logging
 
 from ase.calculators.calculator import Calculator
-from ase.io.trajectory import Trajectory
 from ase.md import VelocityVerlet
 from ase.io import Trajectory
 from ase import Atoms, units
@@ -38,6 +37,10 @@ def run_dynamics(atoms: Atoms, calc: Calculator, timestep: float, steps: int,
 
     # Store the trajectory data to a temporary directory
     with TemporaryDirectory(dir=temp_dir, prefix='fff') as tmp:
+        # Move to the temporary directory so that no files written to disk overlap
+        os.chdir(tmp)
+
+        # Define the output path
         traj_path = Path(tmp) / "md.traj"
         logger.info(f'Writing trajectory to {traj_path}')
         props_to_write = ['energy', 'forces', 'stress']
