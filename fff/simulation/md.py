@@ -27,10 +27,10 @@ def run_dynamics(atoms: Atoms, calc: Union[Calculator, SPKCalculatorMessage],
         timestep: Timestep size (units: fs)
         steps: Number of steps to run
         log_interval: Number of steps between storing structures
-        temp_dir: Root path in which to create the directories
-
+        temp_dir: Root path in which to create the temporary files
+        device: Device on which to perform the ML inference
     Returns:
-        - Final structure
+        - List of structures sampled along the way
     """
 
     # Unpack a ML calculator

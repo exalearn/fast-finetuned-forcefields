@@ -301,11 +301,7 @@ def train_schnet(model: Union[TorchMessage, torch.nn.Module, Path],
         trainer.train(device, n_epochs=num_epochs)
 
         # Load in the best model
-        model = torch.load(os.path.join(td, 'best_model'))
-
-        # Move the model off of the GPU to save memory
-        if 'cuda' in device:
-            model.to('cpu')
+        model = torch.load(os.path.join(td, 'best_model'), map_location='cpu')
 
         # Load in the training results
         train_results = pd.read_csv(os.path.join(td, 'log.csv'))
