@@ -1,4 +1,4 @@
-# Environment that uses CPU versions of all codes
+# Environment that uses CUDA 11.6
 name: fastforce
 channels:
   - defaults
@@ -11,9 +11,19 @@ dependencies:
   - tqdm
   - jupyterlab
   - matplotlib
+  - tensorboard
   - pytest
   - pip
   - pip:
+      # Latest version of PyG: https://github.com/pyg-team/pytorch_geometric#pytorch-112
+      - --extra-index-url https://download.pytorch.org/whl/cu116
+      - -f https://data.pyg.org/whl/torch-1.12.0+cu116.html
+      - torch-scatter
+      - torch-sparse
+      - torch-geometric
+      - torch==1.12.0+cu116
       - git+https://gitlab.com/WardLT/ase.git@twostep_nwc
       - colmena>=0.3.0
       - globus-cli
+      - schnetpack==1.*
+      - -e .
