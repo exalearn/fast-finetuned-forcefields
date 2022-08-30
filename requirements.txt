@@ -1,2 +1,6 @@
 colmena>=0.3.0
 ase>=3.22
+schnetpack~=1.0
+torch~=1.12
+
+

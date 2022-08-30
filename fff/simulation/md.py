@@ -1,7 +1,7 @@
 """Sampling structures using molecular dynamics"""
 import os
 from tempfile import TemporaryDirectory
-from typing import Optional, List
+from typing import Optional, List, Union
 from pathlib import Path
 import logging
 
@@ -10,12 +10,15 @@ from ase.md import VelocityVerlet
 from ase.io import Trajectory
 from ase import Atoms, units
 
+from fff.learning.spk import SPKCalculatorMessage
 
 logger = logging.getLogger(__name__)
 
 
-def run_dynamics(atoms: Atoms, calc: Calculator, timestep: float, steps: int,
-                 log_interval: int = 100, temp_dir: Optional[Path] = None) -> List[Atoms]:
+def run_dynamics(atoms: Atoms, calc: Union[Calculator, SPKCalculatorMessage],
+                 timestep: float, steps: int,
+                 log_interval: int = 100, temp_dir: Optional[Path] = None,
+                 device: str = 'cpu') -> List[Atoms]:
     """Run molecular dynamics to produce a list of sampled structures
 
     Args:
@@ -24,10 +27,15 @@ def run_dynamics(atoms: Atoms, calc: Calculator, timestep: float, steps: int,
         timestep: Timestep size (units: fs)
         steps: Number of steps to run
         log_interval: Number of steps between storing structures
-        temp_dir:
+        temp_dir: Root path in which to create the directories
+
     Returns:
         - Final structure
     """
+
+    # Unpack a ML calculator
+    if isinstance(calc, SPKCalculatorMessage):
+        calc = calc.load(device)
 
     # Set the calculator
     atoms.calc = calc
@@ -43,7 +51,7 @@ def run_dynamics(atoms: Atoms, calc: Calculator, timestep: float, steps: int,
         # Define the output path
         traj_path = Path(tmp) / "md.traj"
         logger.info(f'Writing trajectory to {traj_path}')
-        props_to_write = ['energy', 'forces', 'stress']
+        props_to_write = ['energy', 'forces']
         with Trajectory(str(traj_path), mode='w', atoms=atoms, properties=props_to_write) as traj:
             dyn.attach(traj, interval=log_interval)
 
