@@ -1,6 +1,7 @@
 from functools import partial, update_wrapper
 from threading import Event
 from datetime import datetime
+from random import choice
 from pathlib import Path
 from typing import Dict
 import hashlib
@@ -12,7 +13,7 @@ import sys
 import torch
 from colmena.models import Result
 from colmena.redis.queue import ClientQueues, make_queue_pairs
-from colmena.thinker import BaseThinker, task_submitter, event_responder, result_processor
+from colmena.thinker import BaseThinker, event_responder, result_processor, ResourceCounter, task_submitter
 from colmena.task_server.funcx import FuncXTaskServer
 from funcx import FuncXClient
 from torch import nn
@@ -20,8 +21,8 @@ import proxystore as ps
 from ase.db import connect
 import numpy as np
 
-from fff.learning.spk import TorchMessage
-from fff.learning.spk import train_schnet
+from fff.learning.spk import TorchMessage, train_schnet, SPKCalculatorMessage
+from fff.simulation.md import run_dynamics
 
 logger = logging.getLogger('main')
 
@@ -34,8 +35,10 @@ class Thinker(BaseThinker):
             queues: ClientQueues,
             out_dir: Path,
             db_path: Path,
+            search_path: Path,
             model: nn.Module,
             n_models: int,
+            n_samplers: int,
             ps_names: Dict[str, str],
     ):
         """
@@ -43,11 +46,15 @@ class Thinker(BaseThinker):
             queues: Queues to send and receive work
             out_dir: Directory in which to write output files
             db_path: Path to the training data which has been collected so far
+            search_path: Path to a databases of geometries to use for searching
             model: Initial model being trained. All further models will be trained using these starting weights
             n_models: Number of models to train in the ensemble
             ps_names: Mapping of task type to ProxyStore object associated with it
         """
-        super().__init__(queues)
+        # Make the resource tracker
+        #  For now, we only control resources over how many samplers are run at a time
+        rec = ResourceCounter(n_samplers, ['sample'])
+        super().__init__(queues, resource_counter=rec)
 
         # Save key configuration
         self.db_path = db_path
@@ -55,23 +62,40 @@ class Thinker(BaseThinker):
         self.ps_names = ps_names
         self.n_models = n_models
         self.out_dir = out_dir
+        self.n_samplers = n_samplers
+
+        # Load in the search space
+        with connect(search_path) as db:
+            self.search_space = [x.toatoms() for x in db.select('')]
+        self.logger.info(f'Loaded a search space of {len(self.search_space)} geometries at {search_path}')
+
+        # State that evolves as we run
+        self.training_round = 0
 
         # Create a proxy for the starting model. It never changes
         #  We store it as a TorchMessage object which can be deserialized more easily
         train_store = ps.store.get_store(self.ps_names['train'])
-        self.starting_model_proxy = train_store.proxy(TorchMessage(self.starting_model), key='starting-model')
+        self.starting_model_proxy = train_store.proxy(TorchMessage(self.starting_model), key='starting-model-0')
 
-        # Configuration information
+        # Create a proxy for the "active" model that we'll use to generate trajectories
+        sample_store = ps.store.get_store(self.ps_names['sample'])
+        self.active_mode_proxy = sample_store.proxy(SPKCalculatorMessage(self.starting_model), key='active-model-0')
+
+        # Coordination between threads
         self.start_training = Event()
-        self.start_training.set()
+
+        # Initialize the system settings
+        self.start_training.set()  # Start by training the model
+        self.rec.reallocate(None, 'sample', 'all')  # Immediately begin sampling new structures too
 
     @event_responder(event_name='start_training')
     def train_models(self):
         """Submit the models to be retrained"""
+        self.training_round += 1
 
         # Load in the training dataset
         with connect(self.db_path) as db:
-            logger.info(f'Connected to a database with {len(db)} entires at {self.db_path}')
+            logger.info(f'Connected to a database with {len(db)} entries at {self.db_path}')
             all_examples = [x.toatoms() for x in db.select("")]
         self.logger.info(f'Loaded {len(all_examples)} training examples')
 
@@ -85,18 +109,53 @@ class Thinker(BaseThinker):
                 self.starting_model_proxy, subset,
                 method='train_schnet',
                 topic='train',
-                task_info={'model_id': i}
+                task_info={'model_id': i, 'training_round': self.training_round},
             )
 
     @result_processor(topic='train')
     def store_models(self, result: Result):
+        """Store a model once it finishes updating"""
         logger.info(f'Received result from model {result.task_info["model_id"]}. Success: {result.success}')
 
         # Save the result to disk
         with open(self.out_dir / 'training-results.json', 'a') as fp:
             print(result.json(exclude={'inputs', 'value'}), file=fp)
 
+        # Save the model to disk
+        if result.success:
+            model_dir = self.out_dir / 'models'
+            model_dir.mkdir(exist_ok=True)
+            with open(model_dir / f'model-{result.task_info["model_id"]}-round-{self.training_round}', 'wb') as fp:
+                torch.save(result.value, fp)
+
         self.done.set()
+
+    @task_submitter(task_type='sample')
+    def submit_sampler(self):
+        """Perform molecular dynamics to generate new structures"""
+
+        # Get a random structure from the database
+        starting_point = choice(self.search_space)
+
+        # Submit it with the latest model
+        self.queues.send_inputs(
+            starting_point, self.active_mode_proxy,
+            method='run_dynamics',
+            topic='sample'
+        )
+
+    @result_processor(topic='sample')
+    def store_sampling_results(self, result: Result):
+        self.logger.info(f'Received sampling result. Success: {result.success}')
+
+        # Save the result to disk
+        with open(self.out_dir / 'sampling-results.json', 'a') as fp:
+            print(result.json(exclude={'inputs', 'value'}), file=fp)
+
+        # Count the new structures
+        if result.success:
+            traj = result.value
+            self.logger.info(f'Produced {len(traj)} new structures')
 
 
 if __name__ == '__main__':
@@ -120,12 +179,18 @@ if __name__ == '__main__':
     group = parser.add_argument_group(title='Problem Definition',
                                       description='Defining the search space, models and optimizers-related settings')
     group.add_argument('--starting-model', help='Path to the MPNN h5 files', required=True)
-    group.add_argument('--training-set', help='Path to the molecules used to train the initial models', required=True)
+    group.add_argument('--training-set', help='Path to ASE DB used to train the initial models', required=True)
+    group.add_argument('--search-space', help='Path to ASE DB of starting structures for molecular dynamics sampling',
+                       required=True)
 
     # Parameters related to training the models
     group = parser.add_argument_group(title="Training Settings")
     group.add_argument("--num-epochs", type=int, default=8, help="Maximum number of training epochs")
     group.add_argument("--ensemble-size", type=int, default=2, help="Number of models to train to create ensemble")
+
+    # Parameters related to sampling for new structures
+    group = parser.add_argument_group(title="Sampling Settings")
+    group.add_argument("--num-samplers", type=int, default=1, help="Number of agents to use to sample structures")
 
     # Parameters related to ProxyStore
     known_ps = [None, 'redis', 'file', 'globus']
@@ -176,7 +241,7 @@ if __name__ == '__main__':
         ps.store.init_store(ps.store.STORES.REDIS, name='redis', hostname=args.redishost, port=args.redisport,
                             stats=True)
     if 'file' in ps_backends:
-        ps.store.init_store(ps.store.STORES.FILE, name='file', store_dir=str(ps_file_dir), stats=True)
+        ps.store.init_store(ps.store.STORES.FILE, name='file', store_dir=str(ps_file_dir.absolute()), stats=True)
     if 'globus' in ps_backends:
         if args.ps_globus_config is None:
             raise ValueError('Must specify --ps-globus-config to use the Globus ProxyStore backend')
@@ -203,10 +268,12 @@ if __name__ == '__main__':
         return out
 
     my_train_schnet = _wrap(train_schnet, num_epochs=args.num_epochs, device='cuda')
+    my_run_dynamics = _wrap(run_dynamics, timestep=0.1, steps=10000, log_interval=100)
 
     # Create the task server
     fx_client = FuncXClient()  # Authenticate with FuncX
     task_map = dict((f, args.ml_endpoint) for f in [my_train_schnet])
+    task_map.update(dict((f, args.qc_endpoint) for f in [my_run_dynamics]))
     doer = FuncXTaskServer(task_map, fx_client, server_queues)
 
     # Create the thinker
@@ -214,16 +281,16 @@ if __name__ == '__main__':
         client_queues,
         out_dir=out_dir,
         db_path=Path(args.training_set),
+        search_path=Path(args.search_space),
         model=starting_model,
         n_models=args.ensemble_size,
+        n_samplers=args.num_samplers,
         ps_names=ps_names
     )
     logging.info('Created the method server and task generator')
 
     try:
         # Launch the servers
-        #  The method server is a Thread, so that it can access the Parsl DFK
-        #  The task generator is a Thread, so that all debugging methods get cast to screen
         doer.start()
         thinker.start()
         logging.info('Launched the servers')
