@@ -7,4 +7,5 @@ python run.py \
     --training-set ../../notebooks/initial-database/initial-ttm.db \
     --search-space ../../notebooks/initial-database/initial-ttm.db \
     --starting-model ../../notebooks/train-schnetpack/test/best_model \
-    --num-qc-workers 1
+    --num-simulators 1 \
+    --num-epochs 128
