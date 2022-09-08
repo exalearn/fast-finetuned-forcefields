@@ -151,7 +151,9 @@ def evaluate_schnet(model: Union[TorchMessage, torch.nn.Module, Path],
         atoms: List of structures to evaluate
         batch_size: Number of molecules to evaluate per batch
         device: Device on which to run the computation
-    Returns
+    Returns:
+        - Energies for each inference
+        - Forces for each inference
     """
 
     # Make sure the models are converted to Torch models

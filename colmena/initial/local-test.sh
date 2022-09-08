@@ -8,4 +8,10 @@ python run.py \
     --search-space ../../notebooks/initial-database/initial-ttm.db \
     --starting-model ../../notebooks/train-schnetpack/test/best_model \
     --num-simulators 1 \
-    --num-epochs 128
+    --run-length 10000 \
+    --num-epochs 8 \
+    --ensemble-size 4 \
+    --infer-chunk-size 100 \
+    --retrain-freq 10 \
+    --num-to-run 1000
+
