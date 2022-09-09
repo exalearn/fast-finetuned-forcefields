@@ -15,6 +15,7 @@ import sys
 
 import ase
 from ase.db import connect
+from ase.calculators.psi4 import Psi4
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from colmena.models import Result
 from colmena.redis.queue import ClientQueues, make_queue_pairs
@@ -25,13 +26,13 @@ from torch import nn
 import proxystore as ps
 import numpy as np
 import torch
-from ttm.ase import TTMCalculator
 
 from fff.learning.spk import TorchMessage, SPKCalculatorMessage, train_schnet, evaluate_schnet
 from fff.simulation import run_calculator
 from fff.simulation.md import run_dynamics
 
 logger = logging.getLogger('main')
+calc = Psi4(method='b3lyp-d3', basis='3-21g', num_threads=64)
 
 
 @dataclass
@@ -682,7 +683,7 @@ if __name__ == '__main__':
     my_train_schnet = _wrap(train_schnet, num_epochs=args.num_epochs, device='cuda')
     my_eval_schnet = _wrap(evaluate_schnet, device='cuda')
     my_run_dynamics = _wrap(run_dynamics, timestep=0.1, steps=args.run_length, log_interval=100)
-    my_run_simulation = _wrap(run_calculator, calc=TTMCalculator())
+    my_run_simulation = _wrap(run_calculator, calc=calc)
 
     # Create the task server
     fx_client = FuncXClient()  # Authenticate with FuncX
