@@ -2,8 +2,8 @@
 name: fastforce
 channels:
   - defaults
-  - conda-forge
   - psi4
+  - conda-forge
 dependencies:
   - python==3.10.*
   - pandas==1.*
