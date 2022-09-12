@@ -7,8 +7,10 @@ from ase.calculators.calculator import Calculator
 from ase import Atoms
 from ase.calculators.psi4 import Psi4
 
+from fff.simulation.utils import write_to_string
 
-def run_calculator(atoms: Atoms, calc: Calculator | dict, temp_path: Optional[str] = None) -> Atoms:
+
+def run_calculator(atoms: Atoms, calc: Calculator | dict, temp_path: Optional[str] = None) -> str:
     """Run an NWChem computation on the requested cluster
 
     Args:
@@ -17,7 +19,7 @@ def run_calculator(atoms: Atoms, calc: Calculator | dict, temp_path: Optional[st
             (only Psi4 supported at the moment for dict)
         temp_path: Base path for the scratch files
     Returns:
-        Atoms after the calculation
+        Atoms after the calculation in a JSON format
     """
 
     atoms = atoms.copy()  # Make a duplicate
@@ -30,11 +32,11 @@ def run_calculator(atoms: Atoms, calc: Calculator | dict, temp_path: Optional[st
         if isinstance(calc, dict):
             calc = calc.copy()
             assert calc.pop('calc') == 'psi4', 'only psi4 is supported for now'
-            calc = Psi4(**calc, directory=temp_dir)
+            calc = Psi4(**calc, directory=temp_dir, PSI_SCRATCH=temp_path)
 
         # Run the calculation
         atoms.calc = calc
         atoms.get_forces()
         atoms.get_potential_energy()
 
-        return atoms
+        return write_to_string(atoms, 'json')

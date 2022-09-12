@@ -10,6 +10,7 @@ from pytest import fixture, mark
 
 from fff.simulation import run_calculator
 from fff.simulation.md import run_dynamics
+from fff.simulation.utils import read_from_string
 
 
 @fixture()
@@ -21,7 +22,8 @@ def atoms():
     'calc', [LennardJones(), {'calc': 'psi4', 'method': 'hf', 'basis': 'sto-3g'}]
 )
 def test_single(calc, atoms):
-    atoms = run_calculator(atoms, calc)
+    atoms_msg = run_calculator(atoms, calc)
+    atoms = read_from_string(atoms_msg, 'json')
     assert len(atoms) == 3
     assert 'forces' in atoms.calc.results  # Ensure that forces have been computed
     assert 'energy' in atoms.calc.results
