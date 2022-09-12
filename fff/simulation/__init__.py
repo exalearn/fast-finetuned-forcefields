@@ -5,17 +5,16 @@ from typing import Optional
 import os
 
 from ase.calculators.calculator import Calculator
-from ase import Atoms
 from ase.calculators.psi4 import Psi4
 
-from fff.simulation.utils import write_to_string
+from fff.simulation.utils import write_to_string, read_from_string
 
 
-def run_calculator(atoms: Atoms, calc: Calculator | dict, temp_path: Optional[str] = None) -> str:
+def run_calculator(xyz: str, calc: Calculator | dict, temp_path: Optional[str] = None) -> str:
     """Run an NWChem computation on the requested cluster
 
     Args:
-        atoms: Cluster to evaluate
+        xyz: Cluster to evaluate
         calc: ASE calculator to use. Either the calculator object or a dictionary describing the settings
             (only Psi4 supported at the moment for dict)
         temp_path: Base path for the scratch files
@@ -25,14 +24,14 @@ def run_calculator(atoms: Atoms, calc: Calculator | dict, temp_path: Optional[st
 
     # Some calculators do not clean up their resources well
     with ProcessPoolExecutor(max_workers=1) as exe:
-        fut = exe.submit(_run_calculator, atoms, calc, temp_path)
+        fut = exe.submit(_run_calculator, xyz, calc, temp_path)
         return fut.result()
 
 
-def _run_calculator(atoms: Atoms, calc: Calculator | dict, temp_path: Optional[str] = None) -> str:
+def _run_calculator(xyz: str, calc: Calculator | dict, temp_path: Optional[str] = None) -> str:
     """Runs the above function, designed to be run inside a new Process"""
 
-    atoms = atoms.copy()  # Make a duplicate
+    atoms = read_from_string(xyz, 'xyz')
 
     with TemporaryDirectory(dir=temp_path, prefix='fff') as temp_dir:
         # Execute from the temp so that the calculators do not interfere

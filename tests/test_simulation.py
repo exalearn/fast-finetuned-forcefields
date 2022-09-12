@@ -8,7 +8,7 @@ from ase.build import molecule
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from pytest import fixture, mark
 
-from fff.simulation import run_calculator
+from fff.simulation import run_calculator, write_to_string
 from fff.simulation.md import run_dynamics
 from fff.simulation.utils import read_from_string
 
@@ -22,7 +22,8 @@ def atoms():
     'calc', [LennardJones(), {'calc': 'psi4', 'method': 'hf', 'basis': 'sto-3g'}]
 )
 def test_single(calc, atoms):
-    atoms_msg = run_calculator(atoms, calc)
+    xyz = write_to_string(atoms, 'xyz')
+    atoms_msg = run_calculator(xyz, calc)
     atoms = read_from_string(atoms_msg, 'json')
     assert len(atoms) == 3
     assert 'forces' in atoms.calc.results  # Ensure that forces have been computed
