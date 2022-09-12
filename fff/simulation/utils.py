@@ -32,5 +32,5 @@ def read_from_string(atoms_msg: str, fmt: str) -> Atoms:
         Parsed atoms object
     """
 
-    out = StringIO(atoms_msg)
+    out = StringIO(str(atoms_msg))  # str() ensures that Proxies are resolved
     return io.read(out, format=fmt)

@@ -1,4 +1,5 @@
 """Collections of Python functions for generating new training data"""
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 from tempfile import TemporaryDirectory
 from typing import Optional
@@ -24,13 +25,14 @@ def run_calculator(xyz: str, calc: Calculator | dict, temp_path: Optional[str] =
 
     # Some calculators do not clean up their resources well
     with ProcessPoolExecutor(max_workers=1) as exe:
-        fut = exe.submit(_run_calculator, xyz, calc, temp_path)
+        fut = exe.submit(_run_calculator, str(xyz), calc, temp_path)  # str ensures proxies are resolved
         return fut.result()
 
 
 def _run_calculator(xyz: str, calc: Calculator | dict, temp_path: Optional[str] = None) -> str:
     """Runs the above function, designed to be run inside a new Process"""
 
+    # Parse the atoms object
     atoms = read_from_string(xyz, 'xyz')
 
     with TemporaryDirectory(dir=temp_path, prefix='fff') as temp_dir:
