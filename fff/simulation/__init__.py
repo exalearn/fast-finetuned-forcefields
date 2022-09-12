@@ -1,4 +1,5 @@
 """Collections of Python functions for generating new training data"""
+from concurrent.futures import ProcessPoolExecutor
 from tempfile import TemporaryDirectory
 from typing import Optional
 import os
@@ -21,6 +22,15 @@ def run_calculator(atoms: Atoms, calc: Calculator | dict, temp_path: Optional[st
     Returns:
         Atoms after the calculation in a JSON format
     """
+
+    # Some calculators do not clean up their resources well
+    with ProcessPoolExecutor(max_workers=1) as exe:
+        fut = exe.submit(_run_calculator, atoms, calc, temp_path)
+        return fut.result()
+
+
+def _run_calculator(atoms: Atoms, calc: Calculator | dict, temp_path: Optional[str] = None) -> str:
+    """Runs the above function, designed to be run inside a new Process"""
 
     atoms = atoms.copy()  # Make a duplicate
 
