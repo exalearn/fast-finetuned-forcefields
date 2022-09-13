@@ -1,0 +1,34 @@
+# Environment that does not use a GPU
+name: fastforce
+channels:
+  - defaults
+  - psi4/label/dev
+  - conda-forge
+dependencies:
+  - python==3.10.*
+  - pandas==1.*
+  - pydantic
+  - pymongo
+  - psi4
+  - tqdm
+  - jupyterlab
+  - matplotlib
+  - tensorboard
+  - pytest
+  - pip
+  - pip:
+      # TODO (wardlt): Move these to a requirements file
+      # Latest version of PyG: https://github.com/pyg-team/pytorch_geometric#pytorch-112
+      - --extra-index-url https://download.pytorch.org/whl/cpu
+      - -f https://data.pyg.org/whl/torch-1.12.0+cpu.html
+      - torch-scatter
+      - torch-sparse
+      - torch-geometric
+      - torch==1.12.0+cpu
+      - git+https://gitlab.com/WardLT/ase.git@twostep_nwc
+      - colmena>=0.3.0
+      - globus-cli
+      - schnetpack==1.*
+      - funcx
+      - funcx-endpoint
+      - -e ..
