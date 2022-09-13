@@ -45,18 +45,23 @@ def run_dynamics(atoms: Atoms, calc: Union[Calculator, SPKCalculatorMessage],
 
     # Store the trajectory data to a temporary directory
     with TemporaryDirectory(dir=temp_dir, prefix='fff') as tmp:
+
         # Move to the temporary directory so that no files written to disk overlap
-        os.chdir(tmp)
+        start_dir = os.getcwd()
+        try:
+            os.chdir(tmp)
 
-        # Define the output path
-        traj_path = Path(tmp) / "md.traj"
-        logger.info(f'Writing trajectory to {traj_path}')
-        props_to_write = ['energy', 'forces']
-        with Trajectory(str(traj_path), mode='w', atoms=atoms, properties=props_to_write) as traj:
-            dyn.attach(traj, interval=log_interval)
+            # Define the output path
+            traj_path = Path(tmp) / "md.traj"
+            logger.info(f'Writing trajectory to {traj_path}')
+            props_to_write = ['energy', 'forces']
+            with Trajectory(str(traj_path), mode='w', atoms=atoms, properties=props_to_write) as traj:
+                dyn.attach(traj, interval=log_interval)
 
-            # Run the dynamics
-            dyn.run(steps)
+                # Run the dynamics
+                dyn.run(steps)
 
-        # Read the trajectory back in and return the atoms
-        return [x for x in Trajectory(str(traj_path), mode='r')]
+            # Read the trajectory back in and return the atoms
+            return [x for x in Trajectory(str(traj_path), mode='r')]
+        finally:
+            os.chdir(start_dir)
