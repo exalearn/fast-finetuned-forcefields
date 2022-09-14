@@ -3,7 +3,7 @@ from threading import Event, Lock
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
-from random import choice
+from random import choice, shuffle
 from pathlib import Path
 from typing import Dict
 import hashlib
@@ -30,9 +30,10 @@ import torch
 from fff.learning.spk import TorchMessage, SPKCalculatorMessage, train_schnet, evaluate_schnet
 from fff.simulation import run_calculator
 from fff.simulation.md import run_dynamics
+from fff.simulation.utils import read_from_string, write_to_string
 
 logger = logging.getLogger('main')
-calc = Psi4(method='b3lyp-d3', basis='3-21g', num_threads=64)
+calc = dict(calc='psi4', method='b3lyp-d3', basis='3-21g', num_threads=64)
 
 
 @dataclass
@@ -90,8 +91,7 @@ class Thinker(BaseThinker):
             infer_pool_size: int,
             n_to_run: int,
             n_models: int,
-            n_samplers: int,
-            n_simulators: int,
+            n_qc_workers: int,
             retrain_freq: int,
             ps_names: Dict[str, str],
     ):
@@ -114,10 +114,11 @@ class Thinker(BaseThinker):
         """
         # Make the resource tracker
         #  For now, we only control resources over how many samplers are run at a time
-        rec = ResourceCounter(n_samplers + n_simulators, ['sample', 'simulate'])
+        rec = ResourceCounter(n_qc_workers, ['sample', 'simulate'])
         super().__init__(queues, resource_counter=rec)
 
         # Save key configuration
+        self.n_qc_workers = n_qc_workers
         self.db_path = db_path
         self.starting_model = model
         self.ps_names = ps_names
@@ -158,7 +159,9 @@ class Thinker(BaseThinker):
 
         # Coordination between threads
         #  Communication from the training tasks
+        self.training_incomplete = 0  # Number of training tasks are are incomplete
         self.start_training = Event()  # Starts training on the latest data
+        self.training_complete = Event()
         self.active_updated = False  # Whether the active model has already been updated for this batch
         self.sampling_ready = Event()  # Starts sampling only after the first models are read
         self.inference_ready = Event()  # Starts inference only after all models are ready
@@ -168,16 +171,18 @@ class Thinker(BaseThinker):
         self.task_queue_audit: list[SimulationTask] = []  # Tasks for checking trajectories
         self.task_queue_active: deque[SimulationTask] = deque(maxlen=self.num_to_run)  # Tasks for best training data
         self.task_queue_lock = Lock()  # Locks both of the task queues
+        self.reallocating = Event()  # Marks that we are re-allocating resources
 
         # Initialize the system settings
         self.start_training.set()  # Start by training the model
-        self.rec.reallocate(None, 'sample', n_samplers)  # Immediately begin sampling new structure
-        self.rec.reallocate(None, 'simulate', n_simulators)  # Will block until first sample is back
+        self.rec.reallocate(None, 'sample', n_qc_workers)  # Start with all devoted to sampling
 
     @event_responder(event_name='start_training')
     def train_models(self):
         """Submit the models to be retrained"""
+        self.training_complete.clear()
         self.training_round += 1
+        self.logger.info(f'Started training batch {self.training_round}')
         self.active_updated = False
 
         # Load in the training dataset
@@ -198,6 +203,7 @@ class Thinker(BaseThinker):
                 topic='train',
                 task_info={'model_id': i, 'training_round': self.training_round},
             )
+            self.training_incomplete += 1
 
     @result_processor(topic='train')
     def store_models(self, result: Result):
@@ -255,12 +261,21 @@ class Thinker(BaseThinker):
             if not any(x is None for x in self.inference_proxies):
                 self.inference_ready.set()
                 self.logger.info('Triggered inference to start')
+                
+        # Check whether training is complete
+        self.training_incomplete -= 1
+        if self.training_incomplete == 0:
+            self.logger.info('All models are trained. Marking that training is complete')
+            self.training_complete.set()
+        else:
+            self.logger.info(f'{self.training_incomplete} models left to train')
 
         self.logger.info('TIMING - End store_models')
 
     @task_submitter(task_type='sample')
     def submit_sampler(self):
         """Perform molecular dynamics to generate new structures"""
+        self.logger.info('TIMING - Start submit_sampler')
         self.sampling_ready.wait()
 
         # Pick randomly from the eligible trajectories
@@ -282,15 +297,24 @@ class Thinker(BaseThinker):
             topic='sample',
             task_info={'traj_id': traj_id}
         )
+        self.logger.info('TIMING - Finish submit_sampler')
 
     @result_processor(topic='sample')
     def store_sampling_results(self, result: Result):
         """Store the results of a sampling run"""
         self.logger.info('TIMING - Start store_sampling_results')
-        self.rec.release('sample', 1)
 
         traj_id = result.task_info['traj_id']
         self.logger.info(f'Received sampling result for trajectory {traj_id}. Success: {result.success}')
+        
+        # Determine whether we shold re-allocate resources
+        if len(self.task_queue_audit) > self.n_qc_workers * 2 and \
+                self.rec.allocated_slots('sample') > 0  and \
+                not self.reallocating.is_set(): 
+            self.reallocating.set()
+            self.logger.info('We have enough sampling tasks, reallocating resources to simulation')
+            self.rec.reallocate('sample', 'simulate', 1, block=False, callback=self.reallocating.clear)
+        self.rec.release('sample', 1)
 
         # Mark that we are done running this trajectory, but it is not validated
         self.search_space[traj_id].validated = False
@@ -440,7 +464,8 @@ class Thinker(BaseThinker):
         """
 
         # Compute the standard deviation of energy per atom across each model
-        energy_std = np.std(np.divide(energies, [len(a) for a in structures]), axis=1),
+        n_atoms = np.array([len(a) for a in structures])
+        energy_std = np.std(np.divide(energies, n_atoms[:, None]), axis=1)
 
         # Make the structures and traj_ids a ndarray so we can slice it easier
         structures = np.array(structures, dtype=object)
@@ -491,41 +516,68 @@ class Thinker(BaseThinker):
         while to_run is None:
             self.has_tasks.wait()
             with self.task_queue_lock:  # Wait for another thread to add structures
-                if len(self.task_queue_audit) > 0:
-                    to_run = self.task_queue_audit.pop(0)  # Get the one off the front of the list
-                    task_type = 'audit'
-                elif len(self.task_queue_active) > 0:
-                    to_run = self.task_queue_active.popleft()  # Get the most recent one
-                    task_type = 'active'
-                else:
-                    self.logger.info('No tasks are available to run. Waiting...')
-                    self.has_tasks.clear()  # We don't have any tasks to run
+                task_type = None
+
+                # Enumerate the lists to choose from
+                list_choices = [
+                    ('audit', self.task_queue_audit, lambda: self.task_queue_audit.pop(0)),
+                    ('active', self.task_queue_active, self.task_queue_active.popleft),
+                ]
+                
+                # Print out how many we have to choose from
+                log_msg = []
+                for _task_type, _task_list, _ in list_choices:
+                    log_msg.append(f'{len(_task_list)} {_task_type} tasks')
+                log_msg = 'Selecting from ' + ', '.join(log_msg)
+                self.logger.info(log_msg)
+                    
+                shuffle(list_choices)  # Shuffle them
+                for _task_type, _task_list, _task_pull in list_choices:  # Iterate in the random order
+                    if len(_task_list) > 0:
+                        to_run = _task_pull()
+                        task_type = _task_type
+
+            # If task_type is None, neither were picked
+            if task_type is None:
+                self.logger.info('No tasks are available to run. Waiting ...')
+                self.has_tasks.clear()  # We don't have any tasks to run
 
         # Submit it
         self.logger.info(f'Selected a {task_type} to run next')
-        self.queues.send_inputs(to_run.atoms, method='run_calculator', topic='simulate',
+        atoms = to_run.atoms
+        atoms.set_center_of_mass([0, 0, 0])
+        xyz = write_to_string(atoms, 'xyz')
+        self.queues.send_inputs(xyz, method='run_calculator', topic='simulate',
+                                keep_inputs=True,  # The XYZ file is not big
                                 task_info={'traj_id': to_run.traj_id, 'task_type': task_type,
-                                           'ml_energy': to_run.ml_eng})
+                                           'ml_energy': to_run.ml_eng, 'xyz': xyz})
 
     @result_processor(topic='simulate')
     def store_simulation(self, result: Result):
         """Store the results from a simulation"""
-        self.rec.release('simulate', 1)
-
         # Get the associated trajectory
         traj_id = result.task_info['traj_id']
         traj = self.search_space[traj_id]
         self.logger.info(f'Received a simulation from trajectory {traj_id}. Success: {result.success}')
+        
+        # Reallocate resources if the task queue is getting too small
+        if len(self.task_queue_audit) < self.n_qc_workers and \
+                self.rec.allocated_slots('simulate') > 0 and \
+                not self.reallocating.is_set(): 
+            self.reallocating.set()
+            self.logger.info('Running low on simulation tasks. Reallocating to sampling')
+            self.rec.reallocate('simulate', 'sample', 1, block=False, callback=self.reallocating.clear)
+        self.rec.release('simulate', 1)
 
         # Write output to disk regardless of whether we were successful
-        with open(self.out_dir / 'simulation-result.json', 'a') as fp:
+        with open(self.out_dir / 'simulation-results.json', 'a') as fp:
             print(result.json(exclude={'value', 'inputs'}), file=fp)
 
         # Store the result in the database if successful
         task_type = result.task_info['task_type']
         if result.success:
             # If an audit calculation, check whether the energy is close to the ML prediction
-            atoms: ase.Atoms = result.value
+            atoms: ase.Atoms = read_from_string(result.value, 'json')
             if task_type == 'audit':
                 ml_eng = result.task_info['ml_energy']
                 difference = abs(ml_eng - atoms.get_potential_energy()) / len(atoms)
@@ -542,12 +594,16 @@ class Thinker(BaseThinker):
 
             # Trigger actions based on number of tasks completed
             if self.num_complete % self.retrain_freq == 0:
-                self.logger.info('Triggering training to restart (if not already ongoing)')
-                self.start_training.set()
+                if self.training_complete.is_set():
+                    self.logger.info('Sufficient data collected to retrain. Triggering training to restart.')
+                    self.start_training.set()
+                else:
+                    self.logger.info('Sufficient data colleceted to retrain, but training is still underway')
             if self.num_complete >= self.num_to_run:
                 self.done.set()
 
         elif task_type == 'audit':
+            # If the calculation failed, we mark the validation as failed
             traj.set_validation(False)
 
 
@@ -566,6 +622,7 @@ if __name__ == '__main__':
                                       description='Information about how to run the tasks')
     group.add_argument("--ml-endpoint", help='FuncX endpoint ID for model training and interface')
     group.add_argument("--qc-endpoint", help='FuncX endpoint ID for quantum chemistry')
+    group.add_argument("--num-qc-workers", type=int, help="Number of workers performing chemistry tasks")
 
     # Problem configuration
     group = parser.add_argument_group(title='Problem Definition',
@@ -580,13 +637,16 @@ if __name__ == '__main__':
     group = parser.add_argument_group(title="Training Settings")
     group.add_argument("--num-epochs", type=int, default=32, help="Maximum number of training epochs")
     group.add_argument("--ensemble-size", type=int, default=8, help="Number of models to train to create ensemble")
-    group.add_argument("--retrain-freq", type=int, default=10, help="Restart training after this many new training points")
+    group.add_argument("--retrain-freq", type=int, default=10,
+                       help="Restart training after this many new training points")
 
     # Parameters related to sampling for new structures
     group = parser.add_argument_group(title="Sampling Settings")
+    #  TODO (wardlt): Switch to using a different endpoint for simulation and sampling tasks?
     group.add_argument("--num-samplers", type=int, default=1, help="Number of agents to use to sample structures")
-    group.add_argument("--run-length", type=int, default=1000, help="How many timesteps to run sampling calculations."
+    group.add_argument("--run-length", type=int, default=100, help="How many timesteps to run sampling calculations."
                                                                     " Is the longest time between auditing states.")
+    group.add_argument("--num-frames", type=int, default=50, help="Number of frames to return per sampling run")
     group.add_argument("--energy-tolerance", type=float, default=0.01,
                        help="Maximum allowable energy different to accept results of sampling run")
 
@@ -598,8 +658,8 @@ if __name__ == '__main__':
                        help='Number of inference chunks to complete before picking next tasks')
 
     # Parameters related to gathering more training data
-    group = parser.add_argument_group(title="Simulation Settings")
-    group.add_argument("--num-simulators", default=1, type=int, help="Number of simulation workers")
+#     group = parser.add_argument_group(title="Simulation Settings")
+#     group.add_argument("--num-simulators", default=1, type=int, help="Number of simulation workers")
 
     # Parameters related to ProxyStore
     known_ps = [None, 'redis', 'file', 'globus']
@@ -682,13 +742,14 @@ if __name__ == '__main__':
 
     my_train_schnet = _wrap(train_schnet, num_epochs=args.num_epochs, device='cuda')
     my_eval_schnet = _wrap(evaluate_schnet, device='cuda')
-    my_run_dynamics = _wrap(run_dynamics, timestep=0.1, steps=args.run_length, log_interval=100)
-    my_run_simulation = _wrap(run_calculator, calc=calc)
+    my_run_dynamics = _wrap(run_dynamics, timestep=0.1, steps=args.run_length, 
+                            log_interval=max(1, args.run_length // args.num_frames), device='cpu')
+    my_run_simulation = _wrap(run_calculator, calc=calc, temp_path=str(out_dir.absolute()))
 
     # Create the task server
     fx_client = FuncXClient()  # Authenticate with FuncX
     task_map = dict((f, args.ml_endpoint) for f in [my_train_schnet, my_eval_schnet])
-    task_map.update(dict((f, args.qc_endpoint) for f in [my_run_dynamics, my_run_simulation]))
+    task_map.update(dict((f, args.qc_endpoint) for f in [my_run_simulation, my_run_dynamics]))
     doer = FuncXTaskServer(task_map, fx_client, server_queues)
 
     # Create the thinker
@@ -702,8 +763,7 @@ if __name__ == '__main__':
         infer_pool_size=args.infer_pool_size,
         n_to_run=args.num_to_run,
         n_models=args.ensemble_size,
-        n_samplers=args.num_samplers,
-        n_simulators=args.num_simulators,
+        n_qc_workers=args.num_qc_workers,
         energy_tolerance=args.energy_tolerance,
         retrain_freq=args.retrain_freq,
         ps_names=ps_names
