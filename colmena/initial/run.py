@@ -15,7 +15,6 @@ import sys
 
 import ase
 from ase.db import connect
-from ase.calculators.psi4 import Psi4
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from colmena.models import Result
 from colmena.redis.queue import ClientQueues, make_queue_pairs
@@ -261,7 +260,7 @@ class Thinker(BaseThinker):
             if not any(x is None for x in self.inference_proxies):
                 self.inference_ready.set()
                 self.logger.info('Triggered inference to start')
-                
+
         # Check whether training is complete
         self.training_incomplete -= 1
         if self.training_incomplete == 0:
@@ -306,11 +305,11 @@ class Thinker(BaseThinker):
 
         traj_id = result.task_info['traj_id']
         self.logger.info(f'Received sampling result for trajectory {traj_id}. Success: {result.success}')
-        
+
         # Determine whether we shold re-allocate resources
         if len(self.task_queue_audit) > self.n_qc_workers * 2 and \
-                self.rec.allocated_slots('sample') > 0  and \
-                not self.reallocating.is_set(): 
+                self.rec.allocated_slots('sample') > 0 and \
+                not self.reallocating.is_set():
             self.reallocating.set()
             self.logger.info('We have enough sampling tasks, reallocating resources to simulation')
             self.rec.reallocate('sample', 'simulate', 1, block=False, callback=self.reallocating.clear)
@@ -523,14 +522,14 @@ class Thinker(BaseThinker):
                     ('audit', self.task_queue_audit, lambda: self.task_queue_audit.pop(0)),
                     ('active', self.task_queue_active, self.task_queue_active.popleft),
                 ]
-                
+
                 # Print out how many we have to choose from
                 log_msg = []
                 for _task_type, _task_list, _ in list_choices:
                     log_msg.append(f'{len(_task_list)} {_task_type} tasks')
                 log_msg = 'Selecting from ' + ', '.join(log_msg)
                 self.logger.info(log_msg)
-                    
+
                 shuffle(list_choices)  # Shuffle them
                 for _task_type, _task_list, _task_pull in list_choices:  # Iterate in the random order
                     if len(_task_list) > 0:
@@ -559,11 +558,11 @@ class Thinker(BaseThinker):
         traj_id = result.task_info['traj_id']
         traj = self.search_space[traj_id]
         self.logger.info(f'Received a simulation from trajectory {traj_id}. Success: {result.success}')
-        
+
         # Reallocate resources if the task queue is getting too small
         if len(self.task_queue_audit) < self.n_qc_workers and \
                 self.rec.allocated_slots('simulate') > 0 and \
-                not self.reallocating.is_set(): 
+                not self.reallocating.is_set():
             self.reallocating.set()
             self.logger.info('Running low on simulation tasks. Reallocating to sampling')
             self.rec.reallocate('simulate', 'sample', 1, block=False, callback=self.reallocating.clear)
@@ -623,6 +622,7 @@ if __name__ == '__main__':
     group.add_argument("--ml-endpoint", help='FuncX endpoint ID for model training and interface')
     group.add_argument("--qc-endpoint", help='FuncX endpoint ID for quantum chemistry')
     group.add_argument("--num-qc-workers", type=int, help="Number of workers performing chemistry tasks")
+    group.add_argument("--parsl", action='store_true', help='Use Parsl instead of FuncX')
 
     # Problem configuration
     group = parser.add_argument_group(title='Problem Definition',
@@ -645,7 +645,7 @@ if __name__ == '__main__':
     #  TODO (wardlt): Switch to using a different endpoint for simulation and sampling tasks?
     group.add_argument("--num-samplers", type=int, default=1, help="Number of agents to use to sample structures")
     group.add_argument("--run-length", type=int, default=100, help="How many timesteps to run sampling calculations."
-                                                                    " Is the longest time between auditing states.")
+                                                                   " Is the longest time between auditing states.")
     group.add_argument("--num-frames", type=int, default=50, help="Number of frames to return per sampling run")
     group.add_argument("--energy-tolerance", type=float, default=0.01,
                        help="Maximum allowable energy different to accept results of sampling run")
@@ -658,8 +658,8 @@ if __name__ == '__main__':
                        help='Number of inference chunks to complete before picking next tasks')
 
     # Parameters related to gathering more training data
-#     group = parser.add_argument_group(title="Simulation Settings")
-#     group.add_argument("--num-simulators", default=1, type=int, help="Number of simulation workers")
+    #     group = parser.add_argument_group(title="Simulation Settings")
+    #     group.add_argument("--num-simulators", default=1, type=int, help="Number of simulation workers")
 
     # Parameters related to ProxyStore
     known_ps = [None, 'redis', 'file', 'globus']
@@ -742,15 +742,28 @@ if __name__ == '__main__':
 
     my_train_schnet = _wrap(train_schnet, num_epochs=args.num_epochs, device='cuda')
     my_eval_schnet = _wrap(evaluate_schnet, device='cuda')
-    my_run_dynamics = _wrap(run_dynamics, timestep=0.1, steps=args.run_length, 
+    my_run_dynamics = _wrap(run_dynamics, timestep=0.1, steps=args.run_length,
                             log_interval=max(1, args.run_length // args.num_frames), device='cpu')
     my_run_simulation = _wrap(run_calculator, calc=calc, temp_path=str(out_dir.absolute()))
 
     # Create the task server
-    fx_client = FuncXClient()  # Authenticate with FuncX
-    task_map = dict((f, args.ml_endpoint) for f in [my_train_schnet, my_eval_schnet])
-    task_map.update(dict((f, args.qc_endpoint) for f in [my_run_simulation, my_run_dynamics]))
-    doer = FuncXTaskServer(task_map, fx_client, server_queues)
+    if args.parsl:
+        from config import theta_debug_and_lambda
+        from colmena.task_server import ParslTaskServer
+        # Create the resource configuration
+        config = theta_debug_and_lambda(str(out_dir))
+
+        # Assign tasks to the appropriate executor
+        methods = [(f, {'executors': ['v100']}) for f in [my_train_schnet, my_eval_schnet]]
+        methods.extend([(f, {'executors': ['knl']}) for f in [my_run_simulation, my_run_dynamics]])
+
+        # Create the server
+        doer = ParslTaskServer(methods, server_queues, config)
+    else:
+        fx_client = FuncXClient()  # Authenticate with FuncX
+        task_map = dict((f, args.ml_endpoint) for f in [my_train_schnet, my_eval_schnet])
+        task_map.update(dict((f, args.qc_endpoint) for f in [my_run_simulation, my_run_dynamics]))
+        doer = FuncXTaskServer(task_map, fx_client, server_queues)
 
     # Create the thinker
     thinker = Thinker(
