@@ -33,7 +33,7 @@ from fff.simulation.md import run_dynamics
 from fff.simulation.utils import read_from_string, write_to_string
 
 logger = logging.getLogger('main')
-calc = dict(calc='psi4', method='b3lyp-d3', basis='3-21g', num_threads=64)
+calc = dict(calc='psi4', method='b3lyp-d3', basis='6-31g', num_threads=64)
 
 
 @dataclass
@@ -298,6 +298,11 @@ class Thinker(BaseThinker):
             task_info={'traj_id': traj_id}
         )
         self.logger.info('TIMING - Finish submit_sampler')
+        
+    def _log_queue_sizes(self):
+        """Log the size fo the result queues"""
+        log_msg = 'Selecting from ' + ', '.join(log_msg)
+        self.logger.info(f'Queue sizes - Audit: {len(self.task_queue_audit)}, Active: {len(self.task_queue_active)}')
 
     @result_processor(topic='sample')
     def store_sampling_results(self, result: Result):
@@ -320,14 +325,13 @@ class Thinker(BaseThinker):
         self.search_space[traj_id].validated = False
         self.search_space[traj_id].running = False
 
-        # Save the result to disk
-        with open(self.out_dir / 'sampling-results.json', 'a') as fp:
-            print(result.json(exclude={'inputs', 'value'}), file=fp)
-
         # If successful, submit the structures for auditing
         if result.success:
             traj = result.value
             self.logger.info(f'Produced {len(traj)} new structures')
+            
+            # Save how many were produced
+            result.task_info['num_produced'] = len(traj) - 1  # First was the initial structure
 
             # Add the latest one to the audit list
             with self.task_queue_lock:
@@ -335,9 +339,14 @@ class Thinker(BaseThinker):
                     atoms=traj[-1], traj_id=traj_id, ml_eng=traj[-1].get_potential_energy()
                 ))
                 self.has_tasks.set()
+            self._log_queue_sizes()
 
             # Add the rest to the list of inference tasks to be completed
-            self.submit_inference(traj[:-1], traj_id)
+            self.submit_inference(traj[1:-1], traj_id)
+            
+        # Save the result to disk
+        with open(self.out_dir / 'sampling-results.json', 'a') as fp:
+            print(result.json(exclude={'inputs', 'value'}), file=fp)
 
         self.logger.info('TIMING - Finish store_sampling_results')
 
@@ -447,6 +456,7 @@ class Thinker(BaseThinker):
             with self.task_queue_lock:
                 self.task_queue_active.extend(selected_structures)
             self.logger.info('Updated task queue')
+            self._log_queue_sizes()
         self.logger.info('TIMING - Finish collect_inference')
 
     def _select_structures(self, structures: list[ase.Atoms], energies: np.ndarray, traj_ids: list[int]) \
@@ -524,18 +534,14 @@ class Thinker(BaseThinker):
                     ('active', self.task_queue_active, self.task_queue_active.popleft),
                 ]
                 
-                # Print out how many we have to choose from
-                log_msg = []
-                for _task_type, _task_list, _ in list_choices:
-                    log_msg.append(f'{len(_task_list)} {_task_type} tasks')
-                log_msg = 'Selecting from ' + ', '.join(log_msg)
-                self.logger.info(log_msg)
-                    
+                # Pick them from random
                 shuffle(list_choices)  # Shuffle them
                 for _task_type, _task_list, _task_pull in list_choices:  # Iterate in the random order
                     if len(_task_list) > 0:
                         to_run = _task_pull()
                         task_type = _task_type
+                        self._log_queue_sizes()
+                        
 
             # If task_type is None, neither were picked
             if task_type is None:
@@ -569,18 +575,18 @@ class Thinker(BaseThinker):
             self.rec.reallocate('simulate', 'sample', 1, block=False, callback=self.reallocating.clear)
         self.rec.release('simulate', 1)
 
-        # Write output to disk regardless of whether we were successful
-        with open(self.out_dir / 'simulation-results.json', 'a') as fp:
-            print(result.json(exclude={'value', 'inputs'}), file=fp)
-
         # Store the result in the database if successful
         task_type = result.task_info['task_type']
         if result.success:
-            # If an audit calculation, check whether the energy is close to the ML prediction
+            # Store the simulation energy for later analysis
             atoms: ase.Atoms = read_from_string(result.value, 'json')
+            dft_energy = atoms.get_potential_energy()
+            result.task_info['dft_energy'] = dft_energy
+            
+            # If an audit calculation, check whether the energy is close to the ML prediction
             if task_type == 'audit':
                 ml_eng = result.task_info['ml_energy']
-                difference = abs(ml_eng - atoms.get_potential_energy()) / len(atoms)
+                difference = abs(ml_eng - dft_energy) / len(atoms)
                 was_successful = difference < self.energy_tolerance
                 traj.set_validation(was_successful)
                 self.logger.info(f'Audit for {traj_id} complete. Result: {was_successful}.'
@@ -605,6 +611,10 @@ class Thinker(BaseThinker):
         elif task_type == 'audit':
             # If the calculation failed, we mark the validation as failed
             traj.set_validation(False)
+            
+        s# Write output to disk regardless of whether we were successful
+        with open(self.out_dir / 'simulation-results.json', 'a') as fp:
+            print(result.json(exclude={'value', 'inputs'}), file=fp)
 
 
 if __name__ == '__main__':
@@ -679,9 +689,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
     run_params = args.__dict__
 
-    # Load in the model
-    starting_model = torch.load(args.starting_model, map_location='cpu')
-
     # Check that the dataset exists
     with connect(args.training_set) as db:
         assert len(db) > 0
@@ -701,7 +708,13 @@ if __name__ == '__main__':
     handlers = [logging.FileHandler(out_dir / 'runtime.log'), logging.StreamHandler(sys.stdout)]
     logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                         level=logging.INFO, handlers=handlers)
-    logging.info(f'Run directory: {out_dir}')
+    logger.info(f'Run directory: {out_dir}')
+    with open(out_dir / 'runparams.json', 'w') as fp:
+        json.dump(run_params, fp)
+    
+    # Load in the model
+    starting_model = torch.load(args.starting_model, map_location='cpu')
+    logger.info(f'Loaded model from {Path(args.starting_model).resolve()}')
 
     # Make the PS scratch directory
     ps_file_dir = out_dir / 'proxy-store'
@@ -740,7 +753,7 @@ if __name__ == '__main__':
         return out
 
 
-    my_train_schnet = _wrap(train_schnet, num_epochs=args.num_epochs, device='cuda')
+    my_train_schnet = _wrap(train_schnet, num_epochs=args.num_epochs, device='cuda', patience=1, reset_weights=False)
     my_eval_schnet = _wrap(evaluate_schnet, device='cuda')
     my_run_dynamics = _wrap(run_dynamics, timestep=0.1, steps=args.run_length, 
                             log_interval=max(1, args.run_length // args.num_frames), device='cpu')
