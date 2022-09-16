@@ -41,11 +41,12 @@ def run_nwchem(atoms: ase.Atoms, calc: NWChem, temp_path: Optional[str] = None) 
     Returns:
         Atoms after the calculation
     """
-    from tempfile import TemporaryDirectory
+    from tempfile import TemporaryDirectory, mkdtemp
     import time
     import os
 
     with TemporaryDirectory(dir=temp_path, prefix='nwc') as temp_dir:
+#        temp_dir = mkdtemp(dir=temp_path, prefix='pnwc')  # Uncomment to make the temporary directory persistant
         # Execute from the temp so that the nwchem.nwi doesn't overwrite another's
         os.chdir(temp_dir)
         
@@ -73,7 +74,9 @@ def generate_structures() -> Iterable[Tuple[str, ase.Atoms]]:
         for info in zp.infolist():
             if info.filename.endswith(".xyz"):
                 with zp.open(info, mode='r') as fp:
-                    yield info.filename, read(TextIOWrapper(fp), format='xyz')
+                    atoms = read(TextIOWrapper(fp), format='xyz')
+                    atoms.set_center_of_mass([0., 0., 0.])
+                    yield info.filename, atoms
 
 
 if __name__ == "__main__":
@@ -93,7 +96,7 @@ if __name__ == "__main__":
     ranks_per_node = cores_per_node
     integral_caching = {
         'memsize': int(0.5 * memory_per_node / ranks_per_node * 1e9 // 8),  # To 64-bit words (GB -> bytes),
-        'filesize': int(disk_space // args.num_parallel * 1e9 // 8)  # Shared amongst parallel workers
+        'filesize': int(disk_space // args.num_parallel // ranks_per_node * 1e9 // 8)  # Shared amongst parallel workers
     }
     calc = nwchem = NWChem(
         memory=f'{memory_per_node / ranks_per_node:.1f} gb',
@@ -144,7 +147,7 @@ if __name__ == "__main__":
     # Make the Parsl configuration
     config = parsl.Config(
         app_cache=False,  # No caching needed
-        retries=1,  # Will restart a job if it fails for any reason
+        retries=0,  # Will restart a job if it fails for any reason
         executors=[HighThroughputExecutor(
             label='launch_from_mpi_nodes',
             max_workers=args.num_parallel,
@@ -153,15 +156,15 @@ if __name__ == "__main__":
                 partition='regular',
                 account='m1513',
                 launcher=SimpleLauncher(),
-                walltime='12:00:00',
+                walltime='36:00:00',
                 nodes_per_block=args.num_nodes * args.num_parallel,
                 init_blocks=0,
                 min_blocks=1,
                 max_blocks=1,  # Maximum number of jobs
                 scheduler_options='#SBATCH --image=ghcr.io/nwchemgit/nwchem-702.mpipr.nersc:latest\n#SBATCH -C knl',
                 worker_init=f'''
-module load python
-conda activate /global/project/projectdirs/m1513/lward/hydronet/env
+#module load python
+#conda activate /global/project/projectdirs/m1513/lward/fast-finedtuned-forcefields/env
 
 module swap craype-{{${{CRAY_CPU_TARGET}},mic-knl}}
 export OMP_NUM_THREADS=1
@@ -173,10 +176,11 @@ export MPICH_GNI_RDMA_THRESHOLD=65536
 export COMEX_MAX_NB_OUTSTANDING=6
 
 which python
+which process_worker_pool.py 
 hostname
 pwd
                     ''',
-                cmd_timeout=120,
+                cmd_timeout=1200,
             ),
         )]
     )
@@ -185,7 +189,7 @@ pwd
     print(f'Submitting from the ZIP file...')
     n_skipped = 0
     with connect('initial.db', type='db') as db:
-        # Submit structures to Pars
+        # Submit structures to Parsl
         futures = []
         for filename, atoms in generate_structures():
             # Store some tracking information

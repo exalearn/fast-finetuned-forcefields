@@ -7,8 +7,8 @@ then computing the energy of structures where the model is least certain.
 This fitting strategy interleaves four different operations:
 
 - _Training_ an ensemble of models
-- _Sampling_ new structures using the models
-- _Inferring_ the energy of sampled structures
+- _Sampling_ new structures using the molecular dynamics
+- _Selecting_ structures 
 - _Calculating_ the energy and forces for selected structures
 
 ## Running the Code
@@ -21,23 +21,33 @@ Once you do, call: `python run.py -h` to get a list of full options.
 
 ## Steering Strategy
 
-There are a few different steering processes. We describe each by when they run and what they do.
+The steering strategy is built to simultaneously achive two objectives: training a forcefield, and sampling structures.
+We implement the steering strategy using 4 "agents" that coordinate together in managing two loosely-coupled loops.
 
-### Training Models
+![coordination-strategy](./figures/thinker-diagram.svg)
+
+The "sampling loop" (inner, green) includes a **Sampler** agents which submits molecular dynamics calculations and then submit the final structure to be audited by a **Calculator** agent before the trajectory is continued. 
+The "training loop" beings with **Selector** agents that finds a diverse pool of structures produced by the **Sampler** that are used to retrain a new model libary by **Trainer** agents.
+
+### Agents
+
+Details of the agents.
+
+#### Trainer
 
 The training part creates an ensemble of models periodically during a run.
 
 Training is built using paired agents:
 
 - _Submitter_ launches a many training task from the starting weights each starting 
-with a different bootstrapped sample of the available training data.
+  with a different bootstrapped sample of the available training data.
 - _Storer_ receives the training results and stores the completed models on disk. 
   Once a first model is complete, it allows the sampler to start. 
   Once all complete, it allows the inference tasks to complete
 
 The training agents start at the beginning of the run and when sufficient data have been acquired.
 
-### Sampling PES
+#### Sampler
 
 The sampling operation produces a stream of new atomic configurations to sample.
 
@@ -60,7 +70,7 @@ We maintain a constant number of parallel sampling experiments, starting a new o
 
 > Should we change MD to the basin-paving? 
 
-### Active Learning
+#### Selector
 
 Active learning calculations start by running inference for each sampled structure 
 from each of the structures produced during training.
@@ -77,12 +87,13 @@ We use a heuristic strategy (i.e., one Logan hacked together without thought):
 We run inference tasks as soon as enough structures are sampled to make a batch large enough to mitigate communication costs.
 Active learning starts when enough inference tasks have completed.
 
-### Calculation
+### Calculator
 
 The calculation tasks are simple: run the physics code to get energies.
 
 Each calculation starts by first picking a structure the "audit" or "active learning" list randomly.
 We launch that calculation to execute remotely and then store the result in an ASE db when complete.
+
 
 ## Implementation Details
 
@@ -103,3 +114,7 @@ At present, we do not explicitly proxy any datasets (but probably should)
 ### Scheduling
 
 TBD. While write this out once I add in some more options.
+
+## Understanding the Output
+
+TBD
