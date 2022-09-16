@@ -197,7 +197,7 @@ def train_schnet(model: Union[TorchMessage, torch.nn.Module, Path],
                  validation_split: float = 0.1,
                  random_state: int = 1,
                  learning_rate: float = 1e-3,
-                 reset_weights: bool = True,
+                 reset_weights: bool = False,
                  patience: int = None,
                  timeout: float = None) -> Union[Tuple[TorchMessage, pd.DataFrame],
                                                  Tuple[TorchMessage, pd.DataFrame, List[float]]]:
@@ -240,24 +240,23 @@ def train_schnet(model: Union[TorchMessage, torch.nn.Module, Path],
     valid = [a for a, x in zip(database, train_split) if not x]
 
     # Start the training process
-    with TemporaryDirectory() as td:
+    with TemporaryDirectory(dir='/dev/shm') as td:
         # Save the data to an ASE Atoms database
         train_file = Path(td) / 'train_data.db'
         train_db = ase_to_spkdata(train, train_file)
-        train_loader = AtomsLoader(train_db, batch_size=batch_size, shuffle=True)
+        train_loader = AtomsLoader(train_db, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=device != "cpu")
 
         valid_file = Path(td) / 'valid_data.db'
         valid_db = ase_to_spkdata(valid, valid_file)
-        valid_loader = AtomsLoader(valid_db, batch_size=batch_size)
+        valid_loader = AtomsLoader(valid_db, batch_size=batch_size, num_workers=8, pin_memory=device != "cpu")
 
         # Make the trainer
         opt = optim.Adam(model.parameters(), lr=learning_rate)
 
         # Make a loss function based on force and energy
-        rho_tradeoff = 0.1  # Between force and energy
+        rho_tradeoff = 0.9  # Between force and energy
 
         def loss(batch, result):
-            # compute the mean squared error on the energies
             diff_energy = batch['energy'] - result['energy']
             err_sq_energy = torch.mean(diff_energy ** 2)
 
