@@ -34,7 +34,6 @@ from fff.simulation.utils import read_from_string, write_to_string
 logger = logging.getLogger('main')
 calc = dict(calc='psi4', method='b3lyp-d3', basis='6-31g', num_threads=64)
 
-
 @dataclass
 class Trajectory:
     """Tracks the state of searching along individual trajectories
@@ -300,7 +299,6 @@ class Thinker(BaseThinker):
         
     def _log_queue_sizes(self):
         """Log the size fo the result queues"""
-        log_msg = 'Selecting from ' + ', '.join(log_msg)
         self.logger.info(f'Queue sizes - Audit: {len(self.task_queue_audit)}, Active: {len(self.task_queue_active)}')
 
     @result_processor(topic='sample')
@@ -368,7 +366,8 @@ class Thinker(BaseThinker):
         self.logger.info(f'Inference pool now has {len(self.inference_pool)} candidates')
 
         # Submit inference chunks if possible
-        while len(self.inference_pool) > self.infer_chunk_size and self.inference_ready.is_set():
+        while len(self.inference_pool) > self.infer_chunk_size and self.inference_ready.is_set() \
+                and self.training_complete.is_set():
             # Split off a chunk
             inf_chunk = self.inference_pool[:self.infer_chunk_size]
             del self.inference_pool[:self.infer_chunk_size]
@@ -539,6 +538,7 @@ class Thinker(BaseThinker):
                         to_run = _task_pull()
                         task_type = _task_type
                         self._log_queue_sizes()
+                        break
 
             # If task_type is None, neither were picked
             if task_type is None:
@@ -609,7 +609,7 @@ class Thinker(BaseThinker):
             # If the calculation failed, we mark the validation as failed
             traj.set_validation(False)
             
-        s# Write output to disk regardless of whether we were successful
+        # Write output to disk regardless of whether we were successful
         with open(self.out_dir / 'simulation-results.json', 'a') as fp:
             print(result.json(exclude={'value', 'inputs'}), file=fp)
 
@@ -704,8 +704,21 @@ if __name__ == '__main__':
 
     # Set up the logging
     handlers = [logging.FileHandler(out_dir / 'runtime.log'), logging.StreamHandler(sys.stdout)]
+    
+    class ParslFilter(logging.Filter):
+        """Filter out Parsl debug logs"""
+
+        def filter(self, record):
+            return not (record.levelno == logging.DEBUG and '/parsl/' in record.pathname)
+
+    for h in handlers:
+        h.addFilter(ParslFilter())
+        
+    
     logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                        level=logging.INFO, handlers=handlers)
+                    level=logging.INFO, handlers=handlers)
+
+
     logger.info(f'Run directory: {out_dir}')
     with open(out_dir / 'runparams.json', 'w') as fp:
         json.dump(run_params, fp)
