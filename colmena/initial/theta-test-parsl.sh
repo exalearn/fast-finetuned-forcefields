@@ -8,12 +8,13 @@ python run.py \
     --search-space ../../notebooks/initial-database/initial-psi4-631g.db \
     --starting-model ../../notebooks/psi4-integration/starting-psi4-model \
     --num-qc-workers 8 \
-    --run-length 100 \
-    --num-epochs 128 \
+    --run-length 1000 \
+    --num-frames 100 \
+    --num-epochs 1024 \
     --ensemble-size 8 \
-    --infer-chunk-size 1000 \
-    --infer-pool-size 4 \
-    --retrain-freq 64 \
+    --infer-chunk-size 2000 \
+    --infer-pool-size 1 \
+    --retrain-freq 16 \
     --num-to-run 1000 \
     --parsl \
     --train-ps-backend redis

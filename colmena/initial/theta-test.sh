@@ -14,4 +14,6 @@ python run.py \
     --infer-chunk-size 1000 \
     --infer-pool-size 4 \
     --retrain-freq 10000 \
-    --num-to-run 1000
+    --num-to-run 1000 \
+    --parsl \
+    --train-ps-backend redis
