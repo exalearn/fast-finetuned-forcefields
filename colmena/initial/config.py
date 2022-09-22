@@ -38,7 +38,7 @@ which python
                     max_blocks=1,
                     cmd_timeout=300,
                     walltime='00:60:00',
-                    scheduler_options='#COBALT --attrs enable_ssh=1'
+                    scheduler_options='#COBALT --attrs enable_ssh=1:filesystems=home,theta-fs0'
             )),
             HighThroughputExecutor(
                 address='localhost',

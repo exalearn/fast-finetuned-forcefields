@@ -34,6 +34,7 @@ from fff.simulation.utils import read_from_string, write_to_string
 logger = logging.getLogger('main')
 calc = dict(calc='psi4', method='b3lyp-d3', basis='6-31g', num_threads=64)
 
+
 @dataclass
 class Trajectory:
     """Tracks the state of searching along individual trajectories
@@ -41,19 +42,13 @@ class Trajectory:
     We mark the starting point, the last point produced from sampling,
     and the last point we produced that has been validated
     """
+    id: int  # ID number of the
     starting: ase.Atoms  # Starting point of the trajectory
     last_validated: ase.Atoms = None  # Last validated point on the trajectory
     current: ase.Atoms = None  # Last point produced along the trajectory
-    validated: bool = True  # Whether `current` has been validated
-    running: bool = False  # Whether the trajectory is running
 
     def __post_init__(self):
         self.last_validated = self.current = self.starting
-
-    @property
-    def eligible(self):
-        """Whether this trajectory is eligible for selecting as a simpling calculation"""
-        return self.validated and not self.running
 
     def set_validation(self, success: bool):
         """Set whether the trajectory was successfully validated
@@ -63,7 +58,6 @@ class Trajectory:
         """
         if success:
             self.last_validated = self.current  # Move the last validated forward
-        self.validated = True
 
 
 @dataclass
@@ -104,8 +98,6 @@ class Thinker(BaseThinker):
             infer_pool_size: Number of inference chunks to perform before selecting new tasks
             n_to_run: Number of simulations to run
             n_models: Number of models to train in the ensemble
-            n_simulators: Number of workers to set aside for simulation
-            n_samplers: Number of workers to set aside for sampling structures
             energy_tolerance: How large of an energy difference to accept when auditing
             retrain_freq: How often to trigger retraining
             ps_names: Mapping of task type to ProxyStore object associated with it
@@ -130,7 +122,9 @@ class Thinker(BaseThinker):
 
         # Load in the search space
         with connect(search_path) as db:
-            self.search_space = [Trajectory(x.toatoms()) for x in db.select('')]
+            self.search_space = [Trajectory(i, x.toatoms()) for i, x in enumerate(db.select(''))]
+            shuffle(self.search_space)
+            self.search_space = deque(self.search_space)
         self.logger.info(f'Loaded a search space of {len(self.search_space)} geometries at {search_path}')
 
         # State that evolves as we run
@@ -157,7 +151,7 @@ class Thinker(BaseThinker):
 
         # Coordination between threads
         #  Communication from the training tasks
-        self.training_incomplete = 0  # Number of training tasks are are incomplete
+        self.training_incomplete = 0  # Number of training tasks that are incomplete
         self.start_training = Event()  # Starts training on the latest data
         self.training_complete = Event()
         self.active_updated = False  # Whether the active model has already been updated for this batch
@@ -170,6 +164,7 @@ class Thinker(BaseThinker):
         self.task_queue_active: deque[SimulationTask] = deque(maxlen=self.num_to_run)  # Tasks for best training data
         self.task_queue_lock = Lock()  # Locks both of the task queues
         self.reallocating = Event()  # Marks that we are re-allocating resources
+        self.to_audit: dict[int, Trajectory] = {}  # List of trajectories being audited
 
         # Initialize the system settings
         self.start_training.set()  # Start by training the model
@@ -276,24 +271,24 @@ class Thinker(BaseThinker):
         self.logger.info('TIMING - Start submit_sampler')
         self.sampling_ready.wait()
 
-        # Pick randomly from the eligible trajectories
-        traj_id = choice([i for i, x in enumerate(self.search_space) if x.eligible])
+        # Pick the next eligible trajectory and start from the last validated structure
+        trajectory = self.search_space.popleft()
+        starting_point = trajectory.starting
 
-        # Start from the last validated structure in the series
-        starting_point = self.search_space[traj_id].last_validated
-        self.search_space[traj_id].running = True  # Mark that we're already running this structure
+        # Add the structure to a list of those being validated
+        self.to_audit[trajectory.id] = trajectory
 
         # Give it some velocity if there is not
         if starting_point.get_velocities().max() < 1e-6:
             self.logger.info(f'Starting from the first step. Initializing temperature')
-            MaxwellBoltzmannDistribution(starting_point, temperature_K=100, rng=np.random.RandomState(traj_id))
+            MaxwellBoltzmannDistribution(starting_point, temperature_K=100)
 
         # Submit it with the latest model
         self.queues.send_inputs(
             starting_point, self.active_model_proxy,
             method='run_dynamics',
             topic='sample',
-            task_info={'traj_id': traj_id}
+            task_info={'traj_id': trajectory.id}
         )
         self.logger.info('TIMING - Finish submit_sampler')
         
@@ -318,10 +313,6 @@ class Thinker(BaseThinker):
             self.rec.reallocate('sample', 'simulate', 1, block=False, callback=self.reallocating.clear)
         self.rec.release('sample', 1)
 
-        # Mark that we are done running this trajectory, but it is not validated
-        self.search_space[traj_id].validated = False
-        self.search_space[traj_id].running = False
-
         # If successful, submit the structures for auditing
         if result.success:
             traj = result.value
@@ -340,7 +331,11 @@ class Thinker(BaseThinker):
 
             # Add the rest to the list of inference tasks to be completed
             self.submit_inference(traj[1:-1], traj_id)
-            
+        else:
+            # If not, push it to the back of the queue
+            traj = self.to_audit.pop(traj_id)
+            self.search_space.append(traj)
+
         # Save the result to disk
         with open(self.out_dir / 'sampling-results.json', 'a') as fp:
             print(result.json(exclude={'inputs', 'value'}), file=fp)
@@ -560,7 +555,6 @@ class Thinker(BaseThinker):
         """Store the results from a simulation"""
         # Get the associated trajectory
         traj_id = result.task_info['traj_id']
-        traj = self.search_space[traj_id]
         self.logger.info(f'Received a simulation from trajectory {traj_id}. Success: {result.success}')
 
         # Reallocate resources if the task queue is getting too small
@@ -580,14 +574,28 @@ class Thinker(BaseThinker):
             dft_energy = atoms.get_potential_energy()
             result.task_info['dft_energy'] = dft_energy
             
+            # See how things compared to 
+            ml_eng = result.task_info['ml_energy']
+            difference = abs(ml_eng - dft_energy) / len(atoms)
+            
             # If an audit calculation, check whether the energy is close to the ML prediction
             if task_type == 'audit':
+                traj = self.to_audit.pop(traj_id)
                 ml_eng = result.task_info['ml_energy']
                 difference = abs(ml_eng - dft_energy) / len(atoms)
                 was_successful = difference < self.energy_tolerance
                 traj.set_validation(was_successful)
                 self.logger.info(f'Audit for {traj_id} complete. Result: {was_successful}.'
                                  f' Difference: {difference:.3f} eV/atom')
+
+                # Add the trajectory back to the list to sample from
+                if was_successful:
+                    self.search_space.appendleft(traj)  # So that we'll continue it sooner
+                else:
+                    self.search_space.append(traj)  # Put it to the back of the list
+            else:
+                # Just print the performance
+                self.logger.info(f'Difference betwen ML and DFT: {difference:.3f} eV/atom')
 
             # Store in the training set
             with connect(self.db_path) as db:
@@ -607,6 +615,7 @@ class Thinker(BaseThinker):
 
         elif task_type == 'audit':
             # If the calculation failed, we mark the validation as failed
+            traj = self.to_audit.pop(traj_id)
             traj.set_validation(False)
             
         # Write output to disk regardless of whether we were successful
@@ -655,7 +664,7 @@ if __name__ == '__main__':
     group.add_argument("--run-length", type=int, default=100, help="How many timesteps to run sampling calculations."
                                                                    " Is the longest time between auditing states.")
     group.add_argument("--num-frames", type=int, default=50, help="Number of frames to return per sampling run")
-    group.add_argument("--energy-tolerance", type=float, default=0.01,
+    group.add_argument("--energy-tolerance", type=float, default=0.1,
                        help="Maximum allowable energy different to accept results of sampling run")
 
     # Parameters related to active learning
@@ -726,6 +735,7 @@ if __name__ == '__main__':
     # Load in the model
     starting_model = torch.load(args.starting_model, map_location='cpu')
     logger.info(f'Loaded model from {Path(args.starting_model).resolve()}')
+    shutil.copyfile(args.starting_model, out_dir / 'starting_model.pth')
 
     # Make the PS scratch directory
     ps_file_dir = out_dir / 'proxy-store'
@@ -764,7 +774,8 @@ if __name__ == '__main__':
         return out
 
 
-    my_train_schnet = _wrap(train_schnet, num_epochs=args.num_epochs, device='cuda', patience=1, reset_weights=False)
+    my_train_schnet = _wrap(train_schnet, num_epochs=args.num_epochs, device='cuda',
+                            learning_rate=5e-4, batch_size=64, patience=8, reset_weights=False)
     my_eval_schnet = _wrap(evaluate_schnet, device='cuda')
     my_run_dynamics = _wrap(run_dynamics, timestep=0.1, steps=args.run_length,
                             log_interval=max(1, args.run_length // args.num_frames), device='cpu')
