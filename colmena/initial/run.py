@@ -79,6 +79,9 @@ class Thinker(BaseThinker):
             search_path: Path,
             model: nn.Module,
             energy_tolerance: float,
+            min_run_length: int,
+            max_run_length: int,
+            samples_per_run: int,
             infer_chunk_size: int,
             infer_pool_size: int,
             n_to_run: int,
@@ -99,6 +102,9 @@ class Thinker(BaseThinker):
             n_to_run: Number of simulations to run
             n_models: Number of models to train in the ensemble
             energy_tolerance: How large of an energy difference to accept when auditing
+            min_run_length: Minimum length of sampling runs
+            max_run_length: Minimum length of sampling runs
+            samples_per_run: Number of samples to produce during a sampling run
             retrain_freq: How often to trigger retraining
             ps_names: Mapping of task type to ProxyStore object associated with it
         """
@@ -119,6 +125,9 @@ class Thinker(BaseThinker):
         self.infer_chunk_size = infer_chunk_size
         self.infer_pool_size = infer_pool_size
         self.retrain_freq = retrain_freq
+        self.min_run_length = min_run_length
+        self.max_run_length = max_run_length
+        self.samples_per_run = samples_per_run
 
         # Load in the search space
         with connect(search_path) as db:
@@ -131,6 +140,7 @@ class Thinker(BaseThinker):
         self.training_round = 0
         self.inference_round = 0
         self.num_complete = 0
+        self.run_length = min_run_length
 
         # Storage for inference tasks and results
         self.inference_pool: list[ase.Atoms] = []  # List of objects ready for inference
@@ -284,11 +294,16 @@ class Thinker(BaseThinker):
             MaxwellBoltzmannDistribution(starting_point, temperature_K=100)
 
         # Submit it with the latest model
+        self.logger.info(f'Running trajectory {trajectory.id} for {self.run_length} steps')
         self.queues.send_inputs(
             starting_point, self.active_model_proxy,
+            input_kwargs={
+                'steps': self.run_length, 
+                'log_interval': max(1, self.run_length // self.samples_per_run)
+            },
             method='run_dynamics',
             topic='sample',
-            task_info={'traj_id': trajectory.id}
+            task_info={'traj_id': trajectory.id, 'run_length': self.run_length}
         )
         self.logger.info('TIMING - Finish submit_sampler')
         
@@ -565,6 +580,12 @@ class Thinker(BaseThinker):
             self.logger.info('Running low on simulation tasks. Reallocating to sampling')
             self.rec.reallocate('simulate', 'sample', 1, block=False, callback=self.reallocating.clear)
         self.rec.release('simulate', 1)
+        
+        # Count the completed calculation
+        self.num_complete += 1
+        self.logger.info(f'Evaluated {self.num_complete}/{self.num_to_run} structures')
+        if self.num_complete >= self.num_to_run:
+            self.done.set()
 
         # Store the result in the database if successful
         task_type = result.task_info['task_type']
@@ -582,7 +603,6 @@ class Thinker(BaseThinker):
             if task_type == 'audit':
                 traj = self.to_audit.pop(traj_id)
                 ml_eng = result.task_info['ml_energy']
-                difference = abs(ml_eng - dft_energy) / len(atoms)
                 was_successful = difference < self.energy_tolerance
                 traj.set_validation(was_successful)
                 self.logger.info(f'Audit for {traj_id} complete. Result: {was_successful}.'
@@ -591,8 +611,15 @@ class Thinker(BaseThinker):
                 # Add the trajectory back to the list to sample from
                 if was_successful:
                     self.search_space.appendleft(traj)  # So that we'll continue it sooner
+                    if self.run_length < self.max_run_length:
+                        self.run_length += self.min_run_length
+                        self.logger.info(f'Increased sampling run to {self.run_length} steps due to audit success')
                 else:
                     self.search_space.append(traj)  # Put it to the back of the list
+                    
+                    if difference > self.energy_tolerance * 10 and self.run_length > self.min_run_length:
+                        self.run_length -= self.min_run_length
+                        self.logger.info(f'Reduced sampling run to {self.run_length} steps due to large differences')
             else:
                 # Just print the performance
                 self.logger.info(f'Difference betwen ML and DFT: {difference:.3f} eV/atom')
@@ -600,8 +627,6 @@ class Thinker(BaseThinker):
             # Store in the training set
             with connect(self.db_path) as db:
                 db.write(atoms, runtime=result.time_running)
-            self.num_complete += 1
-            self.logger.info(f'Finished {self.num_complete}/{self.num_to_run} structures')
 
             # Trigger actions based on number of tasks completed
             if self.num_complete % self.retrain_freq == 0:
@@ -610,13 +635,15 @@ class Thinker(BaseThinker):
                     self.start_training.set()
                 else:
                     self.logger.info('Sufficient data colleceted to retrain, but training is still underway')
-            if self.num_complete >= self.num_to_run:
-                self.done.set()
 
         elif task_type == 'audit':
             # If the calculation failed, we mark the validation as failed
             traj = self.to_audit.pop(traj_id)
             traj.set_validation(False)
+            
+            if self.run_length > self.min_run_length:
+                self.run_length -= self.min_run_length
+                self.logger.info(f'Reduced sampling run to {self.run_length} steps due to failed computation')
             
         # Write output to disk regardless of whether we were successful
         with open(self.out_dir / 'simulation-results.json', 'a') as fp:
@@ -661,11 +688,11 @@ if __name__ == '__main__':
     group = parser.add_argument_group(title="Sampling Settings")
     #  TODO (wardlt): Switch to using a different endpoint for simulation and sampling tasks?
     group.add_argument("--num-samplers", type=int, default=1, help="Number of agents to use to sample structures")
-    group.add_argument("--run-length", type=int, default=100, help="How many timesteps to run sampling calculations."
-                                                                   " Is the longest time between auditing states.")
+    group.add_argument("--min-run-length", type=int, default=100, help="Minimum timesteps to run sampling calculations.")
+    group.add_argument("--max-run-length", type=int, default=5000, help="Maximum timesteps to run sampling calculations.")
     group.add_argument("--num-frames", type=int, default=50, help="Number of frames to return per sampling run")
     group.add_argument("--energy-tolerance", type=float, default=0.1,
-                       help="Maximum allowable energy different to accept results of sampling run")
+                       help="Maximum allowable energy different to accept results of sampling run.")
 
     # Parameters related to active learning
     group = parser.add_argument_group(title='Active Learning')
@@ -700,6 +727,13 @@ if __name__ == '__main__':
     with connect(args.training_set) as db:
         assert len(db) > 0
         pass
+    
+    # Get the hash of the training data and model
+    with open(args.training_set, 'rb') as fp:
+        run_params['data_hash'] = hashlib.sha256(fp.read()).hexdigest()
+    with open(args.starting_model, 'rb') as fp:
+        run_params['model_hash'] = hashlib.sha256(fp.read()).hexdigest()
+
 
     # Prepare the output directory and logger
     start_time = datetime.utcnow()
@@ -777,8 +811,7 @@ if __name__ == '__main__':
     my_train_schnet = _wrap(train_schnet, num_epochs=args.num_epochs, device='cuda',
                             learning_rate=5e-4, batch_size=64, patience=8, reset_weights=False)
     my_eval_schnet = _wrap(evaluate_schnet, device='cuda')
-    my_run_dynamics = _wrap(run_dynamics, timestep=0.1, steps=args.run_length,
-                            log_interval=max(1, args.run_length // args.num_frames), device='cpu')
+    my_run_dynamics = _wrap(run_dynamics, timestep=0.1, device='cpu')
     my_run_simulation = _wrap(run_calculator, calc=calc, temp_path=str(out_dir.absolute()))
 
     # Create the task server
@@ -813,6 +846,9 @@ if __name__ == '__main__':
         n_models=args.ensemble_size,
         n_qc_workers=args.num_qc_workers,
         energy_tolerance=args.energy_tolerance,
+        min_run_length=args.min_run_length,
+        max_run_length=args.max_run_length,
+        samples_per_run=args.num_frames,
         retrain_freq=args.retrain_freq,
         ps_names=ps_names
     )
