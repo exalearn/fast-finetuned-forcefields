@@ -3,9 +3,9 @@ from threading import Event, Lock
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
-from random import choice, shuffle
+from random import shuffle
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple
 import hashlib
 import logging
 import argparse
@@ -20,6 +20,7 @@ from colmena.models import Result
 from colmena.redis.queue import ClientQueues, make_queue_pairs
 from colmena.thinker import BaseThinker, event_responder, result_processor, ResourceCounter, task_submitter
 from colmena.task_server.funcx import FuncXTaskServer
+from sklearn.isotonic import IsotonicRegression
 from funcx import FuncXClient
 from torch import nn
 import proxystore as ps
@@ -44,11 +45,23 @@ class Trajectory:
     """
     id: int  # ID number of the
     starting: ase.Atoms  # Starting point of the trajectory
+    current_timestep = 0  # How many timesteps have been used so far
     last_validated: ase.Atoms = None  # Last validated point on the trajectory
     current: ase.Atoms = None  # Last point produced along the trajectory
+    last_run_length: int = 0  # How long between current and last_validated
 
     def __post_init__(self):
         self.last_validated = self.current = self.starting
+
+    def update_current_structure(self, strc: ase.Atoms, run_length: int):
+        """Update the structure that has yet to be updated
+
+        Args:
+            strc: Structure produced by sampling
+            run_length: How many timesteps were performed in sampling run
+        """
+        self.current = strc.copy()
+        self.last_run_length = run_length
 
     def set_validation(self, success: bool):
         """Set whether the trajectory was successfully validated
@@ -58,6 +71,7 @@ class Trajectory:
         """
         if success:
             self.last_validated = self.current  # Move the last validated forward
+            self.current_timestep += self.last_run_length
 
 
 @dataclass
@@ -141,6 +155,7 @@ class Thinker(BaseThinker):
         self.inference_round = 0
         self.num_complete = 0
         self.run_length = min_run_length
+        self.audit_results: deque[Tuple[float, float]] = deque(maxlen=self.n_qc_workers * 2)  # Run length vs error
 
         # Storage for inference tasks and results
         self.inference_pool: list[ase.Atoms] = []  # List of objects ready for inference
@@ -194,11 +209,13 @@ class Thinker(BaseThinker):
             all_examples = np.array([x.toatoms() for x in db.select("")], dtype=object)
         self.logger.info(f'Loaded {len(all_examples)} training examples')
 
-        # Send off the models to be trained
-        for i in range(self.n_models):
-            # Sample the dataset with replacement
-            subset = np.random.choice(all_examples, size=len(all_examples), replace=True)
+        # Sample the training sets and proxy them
+        subsets = [np.random.choice(all_examples, size=len(all_examples), replace=True) for i in range(self.n_models)]
+        store = ps.store.get_store(self.ps_names['store'])  # TODO (wardlt): Store stores not names?
+        subset_proxies = store.proxy_batch(subsets)
 
+        # Send off the models to be trained
+        for i, subset in enumerate(subset_proxies):
             # Send a training job
             self.queues.send_inputs(
                 self.starting_model_proxy, subset,
@@ -288,17 +305,28 @@ class Thinker(BaseThinker):
         # Add the structure to a list of those being validated
         self.to_audit[trajectory.id] = trajectory
 
+        # Determine the run length based on observations of errors
+        if len(self.audit_results) > self.n_qc_workers:
+            # Fit model to predict run length given audit error
+            run_length, audit_error = zip(*self.audit_results)
+            model = IsotonicRegression(y_min=self.min_run_length,  # Ensure it stays within desired bounds
+                                       y_max=self.max_run_length)
+            model.fit(audit_error, run_length)
+            self.run_length = int(model.predict(self.energy_tolerance * 2))  # Target errors just above the threshold
+            self.logger.info(f'Adjusted run length to {self.run_length} based on audit results')
+
         # Give it some velocity if there is not
         if starting_point.get_velocities().max() < 1e-6:
             self.logger.info(f'Starting from the first step. Initializing temperature')
             MaxwellBoltzmannDistribution(starting_point, temperature_K=100)
 
         # Submit it with the latest model
-        self.logger.info(f'Running trajectory {trajectory.id} for {self.run_length} steps')
+        self.logger.info(f'Running trajectory {trajectory.id} for {self.run_length} steps '
+                         f'starting at {trajectory.current_timestep}')
         self.queues.send_inputs(
             starting_point, self.active_model_proxy,
             input_kwargs={
-                'steps': self.run_length, 
+                'steps': self.run_length,
                 'log_interval': max(1, self.run_length // self.samples_per_run)
             },
             method='run_dynamics',
@@ -306,7 +334,7 @@ class Thinker(BaseThinker):
             task_info={'traj_id': trajectory.id, 'run_length': self.run_length}
         )
         self.logger.info('TIMING - Finish submit_sampler')
-        
+
     def _log_queue_sizes(self):
         """Log the size fo the result queues"""
         self.logger.info(f'Queue sizes - Audit: {len(self.task_queue_audit)}, Active: {len(self.task_queue_active)}')
@@ -319,7 +347,7 @@ class Thinker(BaseThinker):
         traj_id = result.task_info['traj_id']
         self.logger.info(f'Received sampling result for trajectory {traj_id}. Success: {result.success}')
 
-        # Determine whether we shold re-allocate resources
+        # Determine whether we should re-allocate resources
         if len(self.task_queue_audit) > self.n_qc_workers * 2 and \
                 self.rec.allocated_slots('sample') > 0 and \
                 not self.reallocating.is_set():
@@ -332,9 +360,12 @@ class Thinker(BaseThinker):
         if result.success:
             traj = result.value
             self.logger.info(f'Produced {len(traj)} new structures')
-            
+
             # Save how many were produced
             result.task_info['num_produced'] = len(traj) - 1  # First was the initial structure
+
+            # Update the state of the trajectory
+            self.to_audit[traj_id].update_current_structure(traj[-1], result.task_info['run_length'])
 
             # Add the latest one to the audit list
             with self.task_queue_lock:
@@ -379,8 +410,13 @@ class Thinker(BaseThinker):
         while len(self.inference_pool) > self.infer_chunk_size and self.inference_ready.is_set() \
                 and self.training_complete.is_set():
             # Split off a chunk
+            shuffle(self.inference_pool)  # Nearby samples are correlated, this breaks that up
             inf_chunk = self.inference_pool[:self.infer_chunk_size]
             del self.inference_pool[:self.infer_chunk_size]
+
+            # Proxy the inference chunk
+            store = ps.store.get_store(self.ps_names['infer'])
+            inf_proxy = store.proxy(inf_chunk)
 
             # Prepare storage for the outputs
             #  Includes a list of the structures and a placeholder for the results
@@ -388,9 +424,8 @@ class Thinker(BaseThinker):
 
             # Submit inference for each model
             for model_id, model_msg in enumerate(self.inference_proxies):
-                # TODO (wardlt): Proxy the inference chunk?
                 self.queues.send_inputs(
-                    model_msg, inf_chunk, method='evaluate_schnet', topic='infer',
+                    model_msg, inf_proxy, method='evaluate_schnet', topic='infer',
                     task_info={'model_id': model_id, 'infer_id': self.inference_round}
                 )
 
@@ -580,7 +615,7 @@ class Thinker(BaseThinker):
             self.logger.info('Running low on simulation tasks. Reallocating to sampling')
             self.rec.reallocate('simulate', 'sample', 1, block=False, callback=self.reallocating.clear)
         self.rec.release('simulate', 1)
-        
+
         # Count the completed calculation
         self.num_complete += 1
         self.logger.info(f'Evaluated {self.num_complete}/{self.num_to_run} structures')
@@ -594,35 +629,31 @@ class Thinker(BaseThinker):
             atoms: ase.Atoms = read_from_string(result.value, 'json')
             dft_energy = atoms.get_potential_energy()
             result.task_info['dft_energy'] = dft_energy
-            
+
             # See how things compared to 
             ml_eng = result.task_info['ml_energy']
             difference = abs(ml_eng - dft_energy) / len(atoms)
-            
+            result.task_info['difference'] = difference
+
             # If an audit calculation, check whether the energy is close to the ML prediction
             if task_type == 'audit':
                 traj = self.to_audit.pop(traj_id)
-                ml_eng = result.task_info['ml_energy']
                 was_successful = difference < self.energy_tolerance
                 traj.set_validation(was_successful)
-                self.logger.info(f'Audit for {traj_id} complete. Result: {was_successful}.'
-                                 f' Difference: {difference:.3f} eV/atom')
+                self.logger.info(f'Audit for run of {traj.last_run_length} steps for {traj_id} complete.'
+                                 f' Result: {was_successful}. Difference: {difference:.3f} eV/atom')
+
+                # Update the audit history
+                self.audit_results.append((traj.last_run_length, difference))
 
                 # Add the trajectory back to the list to sample from
                 if was_successful:
                     self.search_space.appendleft(traj)  # So that we'll continue it sooner
-                    if self.run_length < self.max_run_length:
-                        self.run_length += self.min_run_length
-                        self.logger.info(f'Increased sampling run to {self.run_length} steps due to audit success')
                 else:
                     self.search_space.append(traj)  # Put it to the back of the list
-                    
-                    if difference > self.energy_tolerance * 10 and self.run_length > self.min_run_length:
-                        self.run_length -= self.min_run_length
-                        self.logger.info(f'Reduced sampling run to {self.run_length} steps due to large differences')
             else:
                 # Just print the performance
-                self.logger.info(f'Difference betwen ML and DFT: {difference:.3f} eV/atom')
+                self.logger.info(f'Difference between ML and DFT: {difference:.3f} eV/atom')
 
             # Store in the training set
             with connect(self.db_path) as db:
@@ -634,17 +665,16 @@ class Thinker(BaseThinker):
                     self.logger.info('Sufficient data collected to retrain. Triggering training to restart.')
                     self.start_training.set()
                 else:
-                    self.logger.info('Sufficient data colleceted to retrain, but training is still underway')
+                    self.logger.info('Sufficient data collected to retrain, but training is still underway')
 
         elif task_type == 'audit':
             # If the calculation failed, we mark the validation as failed
             traj = self.to_audit.pop(traj_id)
             traj.set_validation(False)
-            
-            if self.run_length > self.min_run_length:
-                self.run_length -= self.min_run_length
-                self.logger.info(f'Reduced sampling run to {self.run_length} steps due to failed computation')
-            
+
+            # Add a large error value to the queue
+            self.audit_results.append((traj.last_run_length, 10))  # 10 eV/atom is much larger than our typical error
+
         # Write output to disk regardless of whether we were successful
         with open(self.out_dir / 'simulation-results.json', 'a') as fp:
             print(result.json(exclude={'value', 'inputs'}), file=fp)
@@ -688,8 +718,10 @@ if __name__ == '__main__':
     group = parser.add_argument_group(title="Sampling Settings")
     #  TODO (wardlt): Switch to using a different endpoint for simulation and sampling tasks?
     group.add_argument("--num-samplers", type=int, default=1, help="Number of agents to use to sample structures")
-    group.add_argument("--min-run-length", type=int, default=100, help="Minimum timesteps to run sampling calculations.")
-    group.add_argument("--max-run-length", type=int, default=5000, help="Maximum timesteps to run sampling calculations.")
+    group.add_argument("--min-run-length", type=int, default=100,
+                       help="Minimum timesteps to run sampling calculations.")
+    group.add_argument("--max-run-length", type=int, default=5000,
+                       help="Maximum timesteps to run sampling calculations.")
     group.add_argument("--num-frames", type=int, default=50, help="Number of frames to return per sampling run")
     group.add_argument("--energy-tolerance", type=float, default=0.1,
                        help="Maximum allowable energy different to accept results of sampling run.")
@@ -727,13 +759,12 @@ if __name__ == '__main__':
     with connect(args.training_set) as db:
         assert len(db) > 0
         pass
-    
+
     # Get the hash of the training data and model
     with open(args.training_set, 'rb') as fp:
         run_params['data_hash'] = hashlib.sha256(fp.read()).hexdigest()
     with open(args.starting_model, 'rb') as fp:
         run_params['model_hash'] = hashlib.sha256(fp.read()).hexdigest()
-
 
     # Prepare the output directory and logger
     start_time = datetime.utcnow()
@@ -747,25 +778,25 @@ if __name__ == '__main__':
 
     # Set up the logging
     handlers = [logging.FileHandler(out_dir / 'runtime.log'), logging.StreamHandler(sys.stdout)]
-    
+
+
     class ParslFilter(logging.Filter):
         """Filter out Parsl debug logs"""
 
         def filter(self, record):
             return not (record.levelno == logging.DEBUG and '/parsl/' in record.pathname)
 
+
     for h in handlers:
         h.addFilter(ParslFilter())
-        
-    
-    logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    level=logging.INFO, handlers=handlers)
 
+    logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                        level=logging.INFO, handlers=handlers)
 
     logger.info(f'Run directory: {out_dir}')
     with open(out_dir / 'runparams.json', 'w') as fp:
         json.dump(run_params, fp)
-    
+
     # Load in the model
     starting_model = torch.load(args.starting_model, map_location='cpu')
     logger.info(f'Loaded model from {Path(args.starting_model).resolve()}')
@@ -789,7 +820,7 @@ if __name__ == '__main__':
         endpoints = ps.store.globus.GlobusEndpoints.from_json(args.ps_globus_config)
         ps.store.init_store(ps.store.STORES.GLOBUS, name='globus', endpoints=endpoints, stats=True, timeout=600)
     ps_names = {'simulate': args.simulate_ps_backend, 'sample': args.sample_ps_backend,
-                'train': args.train_ps_backend}
+                'train': args.train_ps_backend, 'infer': args.train_ps_backend}
 
     # Connect to the redis server
     client_queues, server_queues = make_queue_pairs(args.redishost,
@@ -818,6 +849,7 @@ if __name__ == '__main__':
     if args.parsl:
         from config import theta_debug_and_lambda
         from colmena.task_server import ParslTaskServer
+
         # Create the resource configuration
         config = theta_debug_and_lambda(str(out_dir))
 
