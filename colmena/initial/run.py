@@ -20,7 +20,6 @@ from colmena.models import Result
 from colmena.redis.queue import ClientQueues, make_queue_pairs
 from colmena.thinker import BaseThinker, event_responder, result_processor, ResourceCounter, task_submitter
 from colmena.task_server.funcx import FuncXTaskServer
-from sklearn.isotonic import IsotonicRegression
 from funcx import FuncXClient
 from torch import nn
 import proxystore as ps
@@ -155,7 +154,7 @@ class Thinker(BaseThinker):
         self.inference_round = 0
         self.num_complete = 0
         self.run_length = min_run_length
-        self.audit_results: deque[Tuple[float, float]] = deque(maxlen=self.n_qc_workers * 2)  # Run length vs error
+        self.audit_results: deque[float] = deque(maxlen=50)  # Audit Error / Run Length
 
         # Storage for inference tasks and results
         self.inference_pool: list[ase.Atoms] = []  # List of objects ready for inference
@@ -211,7 +210,7 @@ class Thinker(BaseThinker):
 
         # Sample the training sets and proxy them
         subsets = [np.random.choice(all_examples, size=len(all_examples), replace=True) for i in range(self.n_models)]
-        store = ps.store.get_store(self.ps_names['store'])  # TODO (wardlt): Store stores not names?
+        store = ps.store.get_store(self.ps_names['train'])  # TODO (wardlt): Store stores not names?
         subset_proxies = store.proxy_batch(subsets)
 
         # Send off the models to be trained
@@ -307,13 +306,12 @@ class Thinker(BaseThinker):
 
         # Determine the run length based on observations of errors
         if len(self.audit_results) > self.n_qc_workers:
-            # Fit model to predict run length given audit error
-            run_length, audit_error = zip(*self.audit_results)
-            model = IsotonicRegression(y_min=self.min_run_length,  # Ensure it stays within desired bounds
-                                       y_max=self.max_run_length)
-            model.fit(audit_error, run_length)
-            self.run_length = int(model.predict(self.energy_tolerance * 2))  # Target errors just above the threshold
-            self.logger.info(f'Adjusted run length to {self.run_length} based on audit results')
+            # Predict run length given audit error
+            error_per_step = np.median(self.audit_results)
+            target_error = self.energy_tolerance * 2
+            estimated_run_length = int(target_error / error_per_step)
+            self.logger.info(f'Estimated run length of {estimated_run_length} steps to have an error of {target_error:.3f} eV/atom')
+            self.run_length = max(self.min_run_length, min(self.max_run_length, estimated_run_length))  # Keep to within the user-defined bounds
 
         # Give it some velocity if there is not
         if starting_point.get_velocities().max() < 1e-6:
@@ -644,7 +642,7 @@ class Thinker(BaseThinker):
                                  f' Result: {was_successful}. Difference: {difference:.3f} eV/atom')
 
                 # Update the audit history
-                self.audit_results.append((traj.last_run_length, difference))
+                self.audit_results.append(difference / traj.last_run_length)
 
                 # Add the trajectory back to the list to sample from
                 if was_successful:
@@ -673,7 +671,7 @@ class Thinker(BaseThinker):
             traj.set_validation(False)
 
             # Add a large error value to the queue
-            self.audit_results.append((traj.last_run_length, 10))  # 10 eV/atom is much larger than our typical error
+            self.audit_results.append(10 / traj.last_run_length)  # 10 eV/atom is much larger than our typical error
 
         # Write output to disk regardless of whether we were successful
         with open(self.out_dir / 'simulation-results.json', 'a') as fp:

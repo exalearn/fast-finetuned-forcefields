@@ -8,10 +8,10 @@ python run.py \
     --search-space ../../notebooks/initial-database/initial-psi4-631g.db \
     --starting-model ../../notebooks/psi4-integration/starting-psi4-model \
     --num-qc-workers 8 \
-    --min-run-length 100 \
+    --min-run-length 200 \
     --max-run-length 5000 \
     --num-frames 100 \
-    --num-epochs 1024 \
+    --num-epochs 512 \
     --ensemble-size 8 \
     --infer-chunk-size 4000 \
     --infer-pool-size 1 \
