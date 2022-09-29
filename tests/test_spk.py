@@ -42,6 +42,9 @@ def test_train(example_waters, schnet):
     log = train_schnet(schnet, example_waters, 2)
     assert len(log) == 2
 
+    log = train_schnet(schnet, example_waters, 2, huber_deltas=(0.3, 3))
+    assert len(log) == 2
+
 
 def test_run(example_waters, schnet):
     energies, forces = evaluate_schnet(schnet, example_waters, batch_size=2)
