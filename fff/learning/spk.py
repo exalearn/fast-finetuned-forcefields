@@ -278,11 +278,12 @@ def train_schnet(model: Union[TorchMessage, torch.nn.Module, Path],
         else:
             # Use huber loss
             delta_energy, delta_force = huber_deltas
+
             def loss(batch: Dict[str, torch.Tensor], result):
                 # compute the mean squared error on the energies per atom
                 n_atoms = batch['_atom_mask'].sum(axis=1)
                 err_sq_energy = torch.nn.functional.huber_loss(batch['energy'] / n_atoms,
-                                                               result['energy'] / n_atoms,
+                                                               result['energy'].float() / n_atoms,
                                                                delta=delta_energy)
 
                 # compute the mean squared error on the forces
