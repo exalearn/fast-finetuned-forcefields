@@ -47,7 +47,7 @@ which python
                 worker_ports=(54928, 54875),  # Hard coded to match up with SSH tunnels
                 worker_logdir_root='/lambda_stor/homes/lward/fast-finedtuned-forcefields/parsl-run/logs',
                 provider=AdHocProvider(
-                    channels=[SSHChannel('lambda1.cels.anl.gov',
+                    channels=[SSHChannel('lambda2.cels.anl.gov',
                                          script_dir='/lambda_stor/homes/lward/fast-finedtuned-forcefields/parsl-run')],
                     worker_init='''
 # Activate conda environment

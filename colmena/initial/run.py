@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from random import shuffle
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any
+from dataclasses import asdict
 import hashlib
 import logging
 import argparse
@@ -79,6 +80,29 @@ class SimulationTask:
     traj_id: int  # Which trajectory this came from
     ml_eng: float  # Energy predicted from machine learning model
     ml_std: float | None = None  # Uncertainty of the model
+    
+    
+def _get_proxy_stats(obj: Any, result: Result):
+    """Update a Result object with the proxy stats of its result
+    Should be run after using the result and just before saving the output
+    Args:
+        obj: Pointer to value of the result before resolution
+        result: Result object to be updated with proxy stats and Globus transfer ID, if available
+    """
+
+    if isinstance(obj, ps.proxy.Proxy):
+        store = ps.store.get_store(obj)
+
+        # Store the resolution stats
+        if store.has_stats:
+            stats = store.stats(obj)
+            stats = dict((k, asdict(v)) for k, v in stats.items())
+            result.task_info['result_proxy_stats'] = stats
+
+        # Store the Xfer ID
+        if isinstance(store, ps.store.globus.GlobusStore):
+            key = ps.proxy.get_key(obj)
+            result.task_info['result_transfer_id'] = key.split(":")[0]
 
 
 class Thinker(BaseThinker):
@@ -163,12 +187,20 @@ class Thinker(BaseThinker):
 
         # Create a proxy for the starting model. It never changes
         #  We store it as a TorchMessage object which can be deserialized more easily
-        train_store = ps.store.get_store(self.ps_names['train'])
-        self.starting_model_proxy = train_store.proxy(TorchMessage(self.starting_model))
+        if 'train' in self.ps_names:
+            train_store = ps.store.get_store(self.ps_names['train'])
+            self.starting_model_proxy = train_store.proxy(TorchMessage(self.starting_model))
+        else:
+            self.starting_model_proxy = TorchMessage(self.starting_model)
+                
 
         # Create a proxy for the "active" model that we'll use to generate trajectories
-        sample_store = ps.store.get_store(self.ps_names['sample'])
-        self.active_model_proxy = sample_store.proxy(SPKCalculatorMessage(self.starting_model))
+        if 'sample' in self.ps_names:
+            sample_store = ps.store.get_store(self.ps_names['sample'])
+            self.active_model_proxy = sample_store.proxy(SPKCalculatorMessage(self.starting_model))
+        else:
+            self.active_model_proxy = SPKCalculatorMessage(self.starting_model)
+                
 
         # Proxies for the inference models
         self.inference_proxies: list[ps.proxy.Proxy | None] = [None] * self.n_models  # None until first trained
@@ -197,6 +229,7 @@ class Thinker(BaseThinker):
     @event_responder(event_name='start_training')
     def train_models(self):
         """Submit the models to be retrained"""
+        self.logger.info('TIMING - Start train_models')
         self.training_complete.clear()
         self.training_round += 1
         self.logger.info(f'Started training batch {self.training_round}')
@@ -210,8 +243,11 @@ class Thinker(BaseThinker):
 
         # Sample the training sets and proxy them
         subsets = [np.random.choice(all_examples, size=len(all_examples), replace=True) for i in range(self.n_models)]
-        store = ps.store.get_store(self.ps_names['train'])  # TODO (wardlt): Store stores not names?
-        subset_proxies = store.proxy_batch(subsets)
+        if 'train' in self.ps_names:
+            store = ps.store.get_store(self.ps_names['train'])  # TODO (wardlt): Store stores not names?
+            subset_proxies = store.proxy_batch(subsets)
+        else:
+            subset_proxies = subsets
 
         # Send off the models to be trained
         for i, subset in enumerate(subset_proxies):
@@ -223,6 +259,7 @@ class Thinker(BaseThinker):
                 task_info={'model_id': i, 'training_round': self.training_round},
             )
             self.training_incomplete += 1
+        self.logger.info('TIMING - Finish train_models')
 
     @result_processor(topic='train')
     def store_models(self, result: Result):
@@ -231,11 +268,8 @@ class Thinker(BaseThinker):
         model_id = result.task_info["model_id"]
         self.logger.info(f'Received result from model {model_id}. Success: {result.success}')
 
-        # Save the result to disk
-        with open(self.out_dir / 'training-results.json', 'a') as fp:
-            print(result.json(exclude={'inputs', 'value'}), file=fp)
-
         # Save the model to disk
+        proxy = result.value
         if result.success:
             # Unpack the result and training history
             model_msg, train_log = result.value
@@ -255,39 +289,53 @@ class Thinker(BaseThinker):
             # Update the "active" model
             if not self.active_updated:
                 # Update the active model
-                sample_store = ps.store.get_store(self.ps_names['sample'])
-                sample_store.evict(ps.proxy.get_key(self.active_model_proxy))
-                self.active_model_proxy = sample_store.proxy(SPKCalculatorMessage(model_msg.get_model()))
+                if 'sample' in self.ps_names:
+                    sample_store = ps.store.get_store(self.ps_names['sample'])
+                    sample_store.evict(ps.proxy.get_key(self.active_model_proxy))
+                    self.active_model_proxy = sample_store.proxy(SPKCalculatorMessage(model_msg.get_model()))
+                else:
+                    self.active_model_proxy = SPKCalculatorMessage(model_msg.get_model())
+                        
                 self.active_updated = True
                 self.logger.info('Updated the active model')
 
                 # Signals that inference can start now that we've saved one model
                 self.sampling_ready.set()
 
-            # Evict the previous inference model
-            inf_store = ps.store.get_store(self.ps_names['train'])
-            prev_model = self.inference_proxies[model_id]
-            if prev_model is not None:
-                prev_key = ps.proxy.get_key(prev_model)
-                inf_store.evict(prev_key)
-                self.logger.info(f'Evicted the previous model for model {model_id}')
+            if 'train' in self.ps_names:
+                # Evict the previous inference model
+                inf_store = ps.store.get_store(self.ps_names['train'])
+                prev_model = self.inference_proxies[model_id]
+                if prev_model is not None:
+                    prev_key = ps.proxy.get_key(prev_model)
+                    inf_store.evict(prev_key)
+                    self.logger.info(f'Evicted the previous model for model {model_id}')
 
-            # Store the next model
-            self.inference_proxies[model_id] = inf_store.proxy(model_msg)
+                # Store the next model
+                self.inference_proxies[model_id] = inf_store.proxy(model_msg)
+            else:
+                self.inference_proxies[model_id] = model_msg
             self.logger.info(f'Stored the proxy for model {model_id}')
 
             # Check if we have a full batch of models
             if not any(x is None for x in self.inference_proxies):
-                self.inference_ready.set()
-                self.logger.info('Triggered inference to start')
+                if not self.inference_ready.is_set():
+                    self.inference_ready.set()
+                    self.logger.info('Inference is now eligible to start')
 
         # Check whether training is complete
         self.training_incomplete -= 1
         if self.training_incomplete == 0:
             self.logger.info('All models are trained. Marking that training is complete')
+            self.submit_inference()  # Command inference to start first
             self.training_complete.set()
         else:
             self.logger.info(f'{self.training_incomplete} models left to train')
+        
+        # Save the result to disk
+        _get_proxy_stats(proxy, result)
+        with open(self.out_dir / 'training-results.json', 'a') as fp:
+            print(result.json(exclude={'inputs', 'value'}), file=fp)
 
         self.logger.info('TIMING - End store_models')
 
@@ -355,6 +403,7 @@ class Thinker(BaseThinker):
         self.rec.release('sample', 1)
 
         # If successful, submit the structures for auditing
+        proxy = result.value
         if result.success:
             traj = result.value
             self.logger.info(f'Produced {len(traj)} new structures')
@@ -371,50 +420,49 @@ class Thinker(BaseThinker):
                     atoms=traj[-1], traj_id=traj_id, ml_eng=traj[-1].get_potential_energy()
                 ))
                 self.has_tasks.set()
-            self._log_queue_sizes()
+                
+            # Store the trajectory ID as information about the atoms object
+            for a in traj:
+                a.info['traj_id'] = traj_id
 
-            # Add the rest to the list of inference tasks to be completed
-            self.submit_inference(traj[1:-1], traj_id)
+            # Extend the current list of candidates
+            self.inference_pool.extend(traj[1:-1])
+            self.logger.info(f'Inference pool now has {len(self.inference_pool)} candidates')
+
+            # Submit if we are not training
+            if self.training_complete.is_set():
+                self.submit_inference()
         else:
             # If not, push it to the back of the queue
             traj = self.to_audit.pop(traj_id)
             self.search_space.append(traj)
 
         # Save the result to disk
+        _get_proxy_stats(proxy, result)
         with open(self.out_dir / 'sampling-results.json', 'a') as fp:
             print(result.json(exclude={'inputs', 'value'}), file=fp)
 
         self.logger.info('TIMING - Finish store_sampling_results')
 
-    def submit_inference(self, candidates: list[ase.Atoms], traj_id: int):
+    def submit_inference(self):
         """Submit a list of tasks for inference
 
-        Called by the class which stores new structures (i.e., not its own agent)
-
-        Args:
-            candidates: List of structures to be submitted
-            traj_id: Trajectory ID for
+        Called by other agents when appropriate
         """
-
-        # Store the trajectory ID as information about the atoms object
-        for a in candidates:
-            a.info['traj_id'] = traj_id
-
-        # Extend the current list of candidates
-        self.inference_pool.extend(candidates)
-        self.logger.info(f'Inference pool now has {len(self.inference_pool)} candidates')
-
+            
         # Submit inference chunks if possible
-        while len(self.inference_pool) > self.infer_chunk_size and self.inference_ready.is_set() \
-                and self.training_complete.is_set():
+        while len(self.inference_pool) > self.infer_chunk_size and self.inference_ready.is_set():
             # Split off a chunk
             shuffle(self.inference_pool)  # Nearby samples are correlated, this breaks that up
             inf_chunk = self.inference_pool[:self.infer_chunk_size]
             del self.inference_pool[:self.infer_chunk_size]
 
             # Proxy the inference chunk
-            store = ps.store.get_store(self.ps_names['infer'])
-            inf_proxy = store.proxy(inf_chunk)
+            if 'infer' in self.ps_names:
+                store = ps.store.get_store(self.ps_names['infer'])
+                inf_proxy = store.proxy(inf_chunk)
+            else:
+                inf_proxy = inf_chunk
 
             # Prepare storage for the outputs
             #  Includes a list of the structures and a placeholder for the results
@@ -442,11 +490,8 @@ class Thinker(BaseThinker):
         # Get the batch information
         infer_id = result.task_info['infer_id']
         model_id = result.task_info['model_id']
+        proxy = result.value
         self.logger.info(f'Received inference batch {infer_id} model {model_id}. Success: {result.success}')
-
-        # Store the results to disk
-        with open(self.out_dir / 'inference-results.json', 'a') as fp:
-            print(result.json(exclude={'value', 'inputs'}), file=fp)
 
         # If first result from batch, create storage
         my_batch = self.inference_results[infer_id]
@@ -498,6 +543,12 @@ class Thinker(BaseThinker):
                 self.task_queue_active.extend(selected_structures)
             self.logger.info('Updated task queue')
             self._log_queue_sizes()
+            
+        # Store the results to disk
+        _get_proxy_stats(proxy, result)
+        with open(self.out_dir / 'inference-results.json', 'a') as fp:
+            print(result.json(exclude={'value', 'inputs'}), file=fp)
+
         self.logger.info('TIMING - Finish collect_inference')
 
     def _select_structures(self, structures: list[ase.Atoms], energies: np.ndarray, traj_ids: list[int]) \
@@ -560,6 +611,7 @@ class Thinker(BaseThinker):
     @task_submitter(task_type="simulate")
     def submit_simulation(self):
         """Submit a new simulation to check results from sampling/gather new training data"""
+        self.logger.info('TIMING - Start submit_simulation')
 
         # Get a simulation to run
         to_run = None
@@ -597,10 +649,13 @@ class Thinker(BaseThinker):
                                 keep_inputs=True,  # The XYZ file is not big
                                 task_info={'traj_id': to_run.traj_id, 'task_type': task_type,
                                            'ml_energy': to_run.ml_eng, 'xyz': xyz})
+        self.logger.info('TIMING - Finish submit_simulation')
 
     @result_processor(topic='simulate')
     def store_simulation(self, result: Result):
         """Store the results from a simulation"""
+        self.logger.info('TIMING - Start store_simulation')
+        
         # Get the associated trajectory
         traj_id = result.task_info['traj_id']
         self.logger.info(f'Received a simulation from trajectory {traj_id}. Success: {result.success}')
@@ -622,6 +677,7 @@ class Thinker(BaseThinker):
 
         # Store the result in the database if successful
         task_type = result.task_info['task_type']
+        proxy = result.value
         if result.success:
             # Store the simulation energy for later analysis
             atoms: ase.Atoms = read_from_string(result.value, 'json')
@@ -645,10 +701,7 @@ class Thinker(BaseThinker):
                 self.audit_results.append(difference / traj.last_run_length)
 
                 # Add the trajectory back to the list to sample from
-                if was_successful:
-                    self.search_space.appendleft(traj)  # So that we'll continue it sooner
-                else:
-                    self.search_space.append(traj)  # Put it to the back of the list
+                self.search_space.append(traj)  # Put it to the back of the list
             else:
                 # Just print the performance
                 self.logger.info(f'Difference between ML and DFT: {difference:.3f} eV/atom')
@@ -674,6 +727,7 @@ class Thinker(BaseThinker):
             self.audit_results.append(10 / traj.last_run_length)  # 10 eV/atom is much larger than our typical error
 
         # Write output to disk regardless of whether we were successful
+        _get_proxy_stats(proxy, result)
         with open(self.out_dir / 'simulation-results.json', 'a') as fp:
             print(result.json(exclude={'value', 'inputs'}), file=fp)
 
@@ -711,6 +765,8 @@ if __name__ == '__main__':
     group.add_argument("--ensemble-size", type=int, default=8, help="Number of models to train to create ensemble")
     group.add_argument("--retrain-freq", type=int, default=10,
                        help="Restart training after this many new training points")
+    group.add_argument('--huber-deltas', type=float, default=None, nargs=2,
+                       help="Huber delta for the energy and forces")
 
     # Parameters related to sampling for new structures
     group = parser.add_argument_group(title="Sampling Settings")
@@ -731,10 +787,6 @@ if __name__ == '__main__':
     group.add_argument('--infer-pool-size', type=int, default=2,
                        help='Number of inference chunks to complete before picking next tasks')
 
-    # Parameters related to gathering more training data
-    #     group = parser.add_argument_group(title="Simulation Settings")
-    #     group.add_argument("--num-simulators", default=1, type=int, help="Number of simulation workers")
-
     # Parameters related to ProxyStore
     known_ps = [None, 'redis', 'file', 'globus']
     group = parser.add_argument_group(title='ProxyStore', description='Settings related to ProxyStore')
@@ -748,6 +800,8 @@ if __name__ == '__main__':
                        help='Min size in bytes for transferring objects via ProxyStore')
     group.add_argument('--ps-globus-config', default=None,
                        help='Globus Endpoint config file to use with the ProxyStore Globus backend')
+    group.add_argument('--no-proxies', action='store_true', 
+                       help='Skip making any proxies.')
 
     # Parse the arguments
     args = parser.parse_args()
@@ -819,6 +873,9 @@ if __name__ == '__main__':
         ps.store.init_store(ps.store.STORES.GLOBUS, name='globus', endpoints=endpoints, stats=True, timeout=600)
     ps_names = {'simulate': args.simulate_ps_backend, 'sample': args.sample_ps_backend,
                 'train': args.train_ps_backend, 'infer': args.train_ps_backend}
+    if args.no_proxies:
+        ps_names = {}
+        logger.info('Not making any proxies')
 
     # Connect to the redis server
     client_queues, server_queues = make_queue_pairs(args.redishost,
@@ -830,7 +887,7 @@ if __name__ == '__main__':
                                                     proxystore_name=ps_names,
                                                     proxystore_threshold=args.ps_threshold)
 
-    # Apply wrappers to functions that will be used to fix certain requirments
+    # Apply wrappers to functions that will be used to fix certain requirements
     def _wrap(func, **kwargs):
         out = partial(func, **kwargs)
         update_wrapper(out, func)
@@ -838,7 +895,8 @@ if __name__ == '__main__':
 
 
     my_train_schnet = _wrap(train_schnet, num_epochs=args.num_epochs, device='cuda',
-                            learning_rate=5e-4, batch_size=64, patience=8, reset_weights=False)
+                            learning_rate=5e-4, batch_size=64, patience=8, reset_weights=False,
+                            huber_deltas=args.huber_deltas)
     my_eval_schnet = _wrap(evaluate_schnet, device='cuda')
     my_run_dynamics = _wrap(run_dynamics, timestep=0.1, device='cpu')
     my_run_simulation = _wrap(run_calculator, calc=calc, temp_path=str(out_dir.absolute()))
