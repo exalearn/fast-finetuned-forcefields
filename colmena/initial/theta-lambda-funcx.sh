@@ -9,13 +9,14 @@ python run.py \
     --starting-model ../../notebooks/psi4-integration/starting-psi4-model \
     --num-qc-workers 8 \
     --min-run-length 200 \
-    --max-run-length 5000 \
+    --max-run-length 2000 \
     --num-frames 100 \
     --num-epochs 512 \
     --ensemble-size 8 \
     --infer-chunk-size 4000 \
     --infer-pool-size 1 \
     --retrain-freq 16 \
-    --num-to-run 1000 \
+    --num-to-run 500 \
+    --huber-deltas 1 10 \
     --train-ps-backend globus \
     --ps-globus-config globus_config.json

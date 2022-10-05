@@ -19,4 +19,5 @@ python run.py \
     --retrain-freq 16 \
     --num-to-run 500 \
     --parsl \
+    --no-proxies \
     --train-ps-backend redis
