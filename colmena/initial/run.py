@@ -449,6 +449,8 @@ class Thinker(BaseThinker):
 
         Called by other agents when appropriate
         """
+        if self.done.is_set():
+            return
             
         # Submit inference chunks if possible
         while len(self.inference_pool) > self.infer_chunk_size and self.inference_ready.is_set():
