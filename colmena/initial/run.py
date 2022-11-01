@@ -3,9 +3,10 @@ from threading import Event, Lock
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
-from random import choice
+from random import shuffle
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple, Any
+from dataclasses import asdict
 import hashlib
 import logging
 import argparse
@@ -15,7 +16,6 @@ import sys
 
 import ase
 from ase.db import connect
-from ase.calculators.psi4 import Psi4
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from colmena.models import Result
 from colmena.redis.queue import ClientQueues, make_queue_pairs
@@ -30,9 +30,10 @@ import torch
 from fff.learning.spk import TorchMessage, SPKCalculatorMessage, train_schnet, evaluate_schnet
 from fff.simulation import run_calculator
 from fff.simulation.md import run_dynamics
+from fff.simulation.utils import read_from_string, write_to_string
 
 logger = logging.getLogger('main')
-calc = Psi4(method='b3lyp-d3', basis='3-21g', num_threads=64)
+calc = dict(calc='psi4', method='b3lyp-d3', basis='6-31g', num_threads=64)
 
 
 @dataclass
@@ -42,19 +43,25 @@ class Trajectory:
     We mark the starting point, the last point produced from sampling,
     and the last point we produced that has been validated
     """
+    id: int  # ID number of the
     starting: ase.Atoms  # Starting point of the trajectory
+    current_timestep = 0  # How many timesteps have been used so far
     last_validated: ase.Atoms = None  # Last validated point on the trajectory
     current: ase.Atoms = None  # Last point produced along the trajectory
-    validated: bool = True  # Whether `current` has been validated
-    running: bool = False  # Whether the trajectory is running
+    last_run_length: int = 0  # How long between current and last_validated
 
     def __post_init__(self):
         self.last_validated = self.current = self.starting
 
-    @property
-    def eligible(self):
-        """Whether this trajectory is eligible for selecting as a simpling calculation"""
-        return self.validated and not self.running
+    def update_current_structure(self, strc: ase.Atoms, run_length: int):
+        """Update the structure that has yet to be updated
+
+        Args:
+            strc: Structure produced by sampling
+            run_length: How many timesteps were performed in sampling run
+        """
+        self.current = strc.copy()
+        self.last_run_length = run_length
 
     def set_validation(self, success: bool):
         """Set whether the trajectory was successfully validated
@@ -64,7 +71,7 @@ class Trajectory:
         """
         if success:
             self.last_validated = self.current  # Move the last validated forward
-        self.validated = True
+            self.current_timestep += self.last_run_length
 
 
 @dataclass
@@ -73,6 +80,29 @@ class SimulationTask:
     traj_id: int  # Which trajectory this came from
     ml_eng: float  # Energy predicted from machine learning model
     ml_std: float | None = None  # Uncertainty of the model
+    
+    
+def _get_proxy_stats(obj: Any, result: Result):
+    """Update a Result object with the proxy stats of its result
+    Should be run after using the result and just before saving the output
+    Args:
+        obj: Pointer to value of the result before resolution
+        result: Result object to be updated with proxy stats and Globus transfer ID, if available
+    """
+
+    if isinstance(obj, ps.proxy.Proxy):
+        store = ps.store.get_store(obj)
+
+        # Store the resolution stats
+        if store.has_stats:
+            stats = store.stats(obj)
+            stats = dict((k, asdict(v)) for k, v in stats.items())
+            result.task_info['result_proxy_stats'] = stats
+
+        # Store the Xfer ID
+        if isinstance(store, ps.store.globus.GlobusStore):
+            key = ps.proxy.get_key(obj)
+            result.task_info['result_transfer_id'] = key.split(":")[0]
 
 
 class Thinker(BaseThinker):
@@ -86,12 +116,14 @@ class Thinker(BaseThinker):
             search_path: Path,
             model: nn.Module,
             energy_tolerance: float,
+            min_run_length: int,
+            max_run_length: int,
+            samples_per_run: int,
             infer_chunk_size: int,
             infer_pool_size: int,
             n_to_run: int,
             n_models: int,
-            n_samplers: int,
-            n_simulators: int,
+            n_qc_workers: int,
             retrain_freq: int,
             ps_names: Dict[str, str],
     ):
@@ -106,18 +138,20 @@ class Thinker(BaseThinker):
             infer_pool_size: Number of inference chunks to perform before selecting new tasks
             n_to_run: Number of simulations to run
             n_models: Number of models to train in the ensemble
-            n_simulators: Number of workers to set aside for simulation
-            n_samplers: Number of workers to set aside for sampling structures
             energy_tolerance: How large of an energy difference to accept when auditing
+            min_run_length: Minimum length of sampling runs
+            max_run_length: Minimum length of sampling runs
+            samples_per_run: Number of samples to produce during a sampling run
             retrain_freq: How often to trigger retraining
             ps_names: Mapping of task type to ProxyStore object associated with it
         """
         # Make the resource tracker
         #  For now, we only control resources over how many samplers are run at a time
-        rec = ResourceCounter(n_samplers + n_simulators, ['sample', 'simulate'])
+        rec = ResourceCounter(n_qc_workers, ['sample', 'simulate'])
         super().__init__(queues, resource_counter=rec)
 
         # Save key configuration
+        self.n_qc_workers = n_qc_workers
         self.db_path = db_path
         self.starting_model = model
         self.ps_names = ps_names
@@ -128,16 +162,23 @@ class Thinker(BaseThinker):
         self.infer_chunk_size = infer_chunk_size
         self.infer_pool_size = infer_pool_size
         self.retrain_freq = retrain_freq
+        self.min_run_length = min_run_length
+        self.max_run_length = max_run_length
+        self.samples_per_run = samples_per_run
 
         # Load in the search space
         with connect(search_path) as db:
-            self.search_space = [Trajectory(x.toatoms()) for x in db.select('')]
+            self.search_space = [Trajectory(i, x.toatoms()) for i, x in enumerate(db.select(''))]
+            shuffle(self.search_space)
+            self.search_space = deque(self.search_space)
         self.logger.info(f'Loaded a search space of {len(self.search_space)} geometries at {search_path}')
 
         # State that evolves as we run
         self.training_round = 0
         self.inference_round = 0
         self.num_complete = 0
+        self.run_length = min_run_length
+        self.audit_results: deque[float] = deque(maxlen=50)  # Audit Error / Run Length
 
         # Storage for inference tasks and results
         self.inference_pool: list[ase.Atoms] = []  # List of objects ready for inference
@@ -146,19 +187,29 @@ class Thinker(BaseThinker):
 
         # Create a proxy for the starting model. It never changes
         #  We store it as a TorchMessage object which can be deserialized more easily
-        train_store = ps.store.get_store(self.ps_names['train'])
-        self.starting_model_proxy = train_store.proxy(TorchMessage(self.starting_model))
+        if 'train' in self.ps_names:
+            train_store = ps.store.get_store(self.ps_names['train'])
+            self.starting_model_proxy = train_store.proxy(TorchMessage(self.starting_model))
+        else:
+            self.starting_model_proxy = TorchMessage(self.starting_model)
+                
 
         # Create a proxy for the "active" model that we'll use to generate trajectories
-        sample_store = ps.store.get_store(self.ps_names['sample'])
-        self.active_model_proxy = sample_store.proxy(SPKCalculatorMessage(self.starting_model))
+        if 'sample' in self.ps_names:
+            sample_store = ps.store.get_store(self.ps_names['sample'])
+            self.active_model_proxy = sample_store.proxy(SPKCalculatorMessage(self.starting_model))
+        else:
+            self.active_model_proxy = SPKCalculatorMessage(self.starting_model)
+                
 
         # Proxies for the inference models
         self.inference_proxies: list[ps.proxy.Proxy | None] = [None] * self.n_models  # None until first trained
 
         # Coordination between threads
         #  Communication from the training tasks
+        self.training_incomplete = 0  # Number of training tasks that are incomplete
         self.start_training = Event()  # Starts training on the latest data
+        self.training_complete = Event()
         self.active_updated = False  # Whether the active model has already been updated for this batch
         self.sampling_ready = Event()  # Starts sampling only after the first models are read
         self.inference_ready = Event()  # Starts inference only after all models are ready
@@ -168,16 +219,20 @@ class Thinker(BaseThinker):
         self.task_queue_audit: list[SimulationTask] = []  # Tasks for checking trajectories
         self.task_queue_active: deque[SimulationTask] = deque(maxlen=self.num_to_run)  # Tasks for best training data
         self.task_queue_lock = Lock()  # Locks both of the task queues
+        self.reallocating = Event()  # Marks that we are re-allocating resources
+        self.to_audit: dict[int, Trajectory] = {}  # List of trajectories being audited
 
         # Initialize the system settings
         self.start_training.set()  # Start by training the model
-        self.rec.reallocate(None, 'sample', n_samplers)  # Immediately begin sampling new structure
-        self.rec.reallocate(None, 'simulate', n_simulators)  # Will block until first sample is back
+        self.rec.reallocate(None, 'sample', n_qc_workers)  # Start with all devoted to sampling
 
     @event_responder(event_name='start_training')
     def train_models(self):
         """Submit the models to be retrained"""
+        self.logger.info('TIMING - Start train_models')
+        self.training_complete.clear()
         self.training_round += 1
+        self.logger.info(f'Started training batch {self.training_round}')
         self.active_updated = False
 
         # Load in the training dataset
@@ -186,11 +241,16 @@ class Thinker(BaseThinker):
             all_examples = np.array([x.toatoms() for x in db.select("")], dtype=object)
         self.logger.info(f'Loaded {len(all_examples)} training examples')
 
-        # Send off the models to be trained
-        for i in range(self.n_models):
-            # Sample the dataset with replacement
-            subset = np.random.choice(all_examples, size=len(all_examples), replace=True)
+        # Sample the training sets and proxy them
+        subsets = [np.random.choice(all_examples, size=len(all_examples), replace=True) for i in range(self.n_models)]
+        if 'train' in self.ps_names:
+            store = ps.store.get_store(self.ps_names['train'])  # TODO (wardlt): Store stores not names?
+            subset_proxies = store.proxy_batch(subsets)
+        else:
+            subset_proxies = subsets
 
+        # Send off the models to be trained
+        for i, subset in enumerate(subset_proxies):
             # Send a training job
             self.queues.send_inputs(
                 self.starting_model_proxy, subset,
@@ -198,6 +258,8 @@ class Thinker(BaseThinker):
                 topic='train',
                 task_info={'model_id': i, 'training_round': self.training_round},
             )
+            self.training_incomplete += 1
+        self.logger.info('TIMING - Finish train_models')
 
     @result_processor(topic='train')
     def store_models(self, result: Result):
@@ -206,11 +268,8 @@ class Thinker(BaseThinker):
         model_id = result.task_info["model_id"]
         self.logger.info(f'Received result from model {model_id}. Success: {result.success}')
 
-        # Save the result to disk
-        with open(self.out_dir / 'training-results.json', 'a') as fp:
-            print(result.json(exclude={'inputs', 'value'}), file=fp)
-
         # Save the model to disk
+        proxy = result.value
         if result.success:
             # Unpack the result and training history
             model_msg, train_log = result.value
@@ -230,80 +289,130 @@ class Thinker(BaseThinker):
             # Update the "active" model
             if not self.active_updated:
                 # Update the active model
-                sample_store = ps.store.get_store(self.ps_names['sample'])
-                sample_store.evict(ps.proxy.get_key(self.active_model_proxy))
-                self.active_model_proxy = sample_store.proxy(SPKCalculatorMessage(model_msg.get_model()))
+                if 'sample' in self.ps_names:
+                    sample_store = ps.store.get_store(self.ps_names['sample'])
+                    sample_store.evict(ps.proxy.get_key(self.active_model_proxy))
+                    self.active_model_proxy = sample_store.proxy(SPKCalculatorMessage(model_msg.get_model()))
+                else:
+                    self.active_model_proxy = SPKCalculatorMessage(model_msg.get_model())
+                        
                 self.active_updated = True
                 self.logger.info('Updated the active model')
 
                 # Signals that inference can start now that we've saved one model
                 self.sampling_ready.set()
 
-            # Evict the previous inference model
-            inf_store = ps.store.get_store(self.ps_names['train'])
-            prev_model = self.inference_proxies[model_id]
-            if prev_model is not None:
-                prev_key = ps.proxy.get_key(prev_model)
-                inf_store.evict(prev_key)
-                self.logger.info(f'Evicted the previous model for model {model_id}')
+            if 'train' in self.ps_names:
+                # Evict the previous inference model
+                inf_store = ps.store.get_store(self.ps_names['train'])
+                prev_model = self.inference_proxies[model_id]
+                if prev_model is not None:
+                    prev_key = ps.proxy.get_key(prev_model)
+                    inf_store.evict(prev_key)
+                    self.logger.info(f'Evicted the previous model for model {model_id}')
 
-            # Store the next model
-            self.inference_proxies[model_id] = inf_store.proxy(model_msg)
+                # Store the next model
+                self.inference_proxies[model_id] = inf_store.proxy(model_msg)
+            else:
+                self.inference_proxies[model_id] = model_msg
             self.logger.info(f'Stored the proxy for model {model_id}')
 
             # Check if we have a full batch of models
             if not any(x is None for x in self.inference_proxies):
-                self.inference_ready.set()
-                self.logger.info('Triggered inference to start')
+                if not self.inference_ready.is_set():
+                    self.inference_ready.set()
+                    self.logger.info('Inference is now eligible to start')
+
+        # Check whether training is complete
+        self.training_incomplete -= 1
+        if self.training_incomplete == 0:
+            self.logger.info('All models are trained. Marking that training is complete')
+            self.submit_inference()  # Command inference to start first
+            self.training_complete.set()
+        else:
+            self.logger.info(f'{self.training_incomplete} models left to train')
+        
+        # Save the result to disk
+        _get_proxy_stats(proxy, result)
+        with open(self.out_dir / 'training-results.json', 'a') as fp:
+            print(result.json(exclude={'inputs', 'value'}), file=fp)
 
         self.logger.info('TIMING - End store_models')
 
     @task_submitter(task_type='sample')
     def submit_sampler(self):
         """Perform molecular dynamics to generate new structures"""
+        self.logger.info('TIMING - Start submit_sampler')
         self.sampling_ready.wait()
 
-        # Pick randomly from the eligible trajectories
-        traj_id = choice([i for i, x in enumerate(self.search_space) if x.eligible])
+        # Pick the next eligible trajectory and start from the last validated structure
+        trajectory = self.search_space.popleft()
+        starting_point = trajectory.starting
 
-        # Start from the last validated structure in the series
-        starting_point = self.search_space[traj_id].last_validated
-        self.search_space[traj_id].running = True  # Mark that we're already running this structure
+        # Add the structure to a list of those being validated
+        self.to_audit[trajectory.id] = trajectory
+
+        # Determine the run length based on observations of errors
+        if len(self.audit_results) > self.n_qc_workers:
+            # Predict run length given audit error
+            error_per_step = np.median(self.audit_results)
+            target_error = self.energy_tolerance * 2
+            estimated_run_length = int(target_error / error_per_step)
+            self.logger.info(f'Estimated run length of {estimated_run_length} steps to have an error of {target_error:.3f} eV/atom')
+            self.run_length = max(self.min_run_length, min(self.max_run_length, estimated_run_length))  # Keep to within the user-defined bounds
 
         # Give it some velocity if there is not
         if starting_point.get_velocities().max() < 1e-6:
             self.logger.info(f'Starting from the first step. Initializing temperature')
-            MaxwellBoltzmannDistribution(starting_point, temperature_K=100, rng=np.random.RandomState(traj_id))
+            MaxwellBoltzmannDistribution(starting_point, temperature_K=100)
 
         # Submit it with the latest model
+        self.logger.info(f'Running trajectory {trajectory.id} for {self.run_length} steps '
+                         f'starting at {trajectory.current_timestep}')
         self.queues.send_inputs(
             starting_point, self.active_model_proxy,
+            input_kwargs={
+                'steps': self.run_length,
+                'log_interval': max(1, self.run_length // self.samples_per_run)
+            },
             method='run_dynamics',
             topic='sample',
-            task_info={'traj_id': traj_id}
+            task_info={'traj_id': trajectory.id, 'run_length': self.run_length}
         )
+        self.logger.info('TIMING - Finish submit_sampler')
+
+    def _log_queue_sizes(self):
+        """Log the size fo the result queues"""
+        self.logger.info(f'Queue sizes - Audit: {len(self.task_queue_audit)}, Active: {len(self.task_queue_active)}')
 
     @result_processor(topic='sample')
     def store_sampling_results(self, result: Result):
         """Store the results of a sampling run"""
         self.logger.info('TIMING - Start store_sampling_results')
-        self.rec.release('sample', 1)
 
         traj_id = result.task_info['traj_id']
         self.logger.info(f'Received sampling result for trajectory {traj_id}. Success: {result.success}')
 
-        # Mark that we are done running this trajectory, but it is not validated
-        self.search_space[traj_id].validated = False
-        self.search_space[traj_id].running = False
-
-        # Save the result to disk
-        with open(self.out_dir / 'sampling-results.json', 'a') as fp:
-            print(result.json(exclude={'inputs', 'value'}), file=fp)
+        # Determine whether we should re-allocate resources
+        if len(self.task_queue_audit) > self.n_qc_workers * 2 and \
+                self.rec.allocated_slots('sample') > 0 and \
+                not self.reallocating.is_set():
+            self.reallocating.set()
+            self.logger.info('We have enough sampling tasks, reallocating resources to simulation')
+            self.rec.reallocate('sample', 'simulate', 1, block=False, callback=self.reallocating.clear)
+        self.rec.release('sample', 1)
 
         # If successful, submit the structures for auditing
+        proxy = result.value
         if result.success:
             traj = result.value
             self.logger.info(f'Produced {len(traj)} new structures')
+
+            # Save how many were produced
+            result.task_info['num_produced'] = len(traj) - 1  # First was the initial structure
+
+            # Update the state of the trajectory
+            self.to_audit[traj_id].update_current_structure(traj[-1], result.task_info['run_length'])
 
             # Add the latest one to the audit list
             with self.task_queue_lock:
@@ -311,35 +420,51 @@ class Thinker(BaseThinker):
                     atoms=traj[-1], traj_id=traj_id, ml_eng=traj[-1].get_potential_energy()
                 ))
                 self.has_tasks.set()
+                
+            # Store the trajectory ID as information about the atoms object
+            for a in traj:
+                a.info['traj_id'] = traj_id
 
-            # Add the rest to the list of inference tasks to be completed
-            self.submit_inference(traj[:-1], traj_id)
+            # Extend the current list of candidates
+            self.inference_pool.extend(traj[1:-1])
+            self.logger.info(f'Inference pool now has {len(self.inference_pool)} candidates')
+
+            # Submit if we are not training
+            if self.training_complete.is_set():
+                self.submit_inference()
+        else:
+            # If not, push it to the back of the queue
+            traj = self.to_audit.pop(traj_id)
+            self.search_space.append(traj)
+
+        # Save the result to disk
+        _get_proxy_stats(proxy, result)
+        with open(self.out_dir / 'sampling-results.json', 'a') as fp:
+            print(result.json(exclude={'inputs', 'value'}), file=fp)
 
         self.logger.info('TIMING - Finish store_sampling_results')
 
-    def submit_inference(self, candidates: list[ase.Atoms], traj_id: int):
+    def submit_inference(self):
         """Submit a list of tasks for inference
 
-        Called by the class which stores new structures (i.e., not its own agent)
-
-        Args:
-            candidates: List of structures to be submitted
-            traj_id: Trajectory ID for
+        Called by other agents when appropriate
         """
-
-        # Store the trajectory ID as information about the atoms object
-        for a in candidates:
-            a.info['traj_id'] = traj_id
-
-        # Extend the current list of candidates
-        self.inference_pool.extend(candidates)
-        self.logger.info(f'Inference pool now has {len(self.inference_pool)} candidates')
-
+        if self.done.is_set():
+            return
+            
         # Submit inference chunks if possible
         while len(self.inference_pool) > self.infer_chunk_size and self.inference_ready.is_set():
             # Split off a chunk
+            shuffle(self.inference_pool)  # Nearby samples are correlated, this breaks that up
             inf_chunk = self.inference_pool[:self.infer_chunk_size]
             del self.inference_pool[:self.infer_chunk_size]
+
+            # Proxy the inference chunk
+            if 'infer' in self.ps_names:
+                store = ps.store.get_store(self.ps_names['infer'])
+                inf_proxy = store.proxy(inf_chunk)
+            else:
+                inf_proxy = inf_chunk
 
             # Prepare storage for the outputs
             #  Includes a list of the structures and a placeholder for the results
@@ -347,9 +472,8 @@ class Thinker(BaseThinker):
 
             # Submit inference for each model
             for model_id, model_msg in enumerate(self.inference_proxies):
-                # TODO (wardlt): Proxy the inference chunk?
                 self.queues.send_inputs(
-                    model_msg, inf_chunk, method='evaluate_schnet', topic='infer',
+                    model_msg, inf_proxy, method='evaluate_schnet', topic='infer',
                     task_info={'model_id': model_id, 'infer_id': self.inference_round}
                 )
 
@@ -368,11 +492,8 @@ class Thinker(BaseThinker):
         # Get the batch information
         infer_id = result.task_info['infer_id']
         model_id = result.task_info['model_id']
+        proxy = result.value
         self.logger.info(f'Received inference batch {infer_id} model {model_id}. Success: {result.success}')
-
-        # Store the results to disk
-        with open(self.out_dir / 'inference-results.json', 'a') as fp:
-            print(result.json(exclude={'value', 'inputs'}), file=fp)
 
         # If first result from batch, create storage
         my_batch = self.inference_results[infer_id]
@@ -423,6 +544,13 @@ class Thinker(BaseThinker):
             with self.task_queue_lock:
                 self.task_queue_active.extend(selected_structures)
             self.logger.info('Updated task queue')
+            self._log_queue_sizes()
+            
+        # Store the results to disk
+        _get_proxy_stats(proxy, result)
+        with open(self.out_dir / 'inference-results.json', 'a') as fp:
+            print(result.json(exclude={'value', 'inputs'}), file=fp)
+
         self.logger.info('TIMING - Finish collect_inference')
 
     def _select_structures(self, structures: list[ase.Atoms], energies: np.ndarray, traj_ids: list[int]) \
@@ -440,7 +568,8 @@ class Thinker(BaseThinker):
         """
 
         # Compute the standard deviation of energy per atom across each model
-        energy_std = np.std(np.divide(energies, [len(a) for a in structures]), axis=1),
+        n_atoms = np.array([len(a) for a in structures])
+        energy_std = np.std(np.divide(energies, n_atoms[:, None]), axis=1)
 
         # Make the structures and traj_ids a ndarray so we can slice it easier
         structures = np.array(structures, dtype=object)
@@ -484,6 +613,7 @@ class Thinker(BaseThinker):
     @task_submitter(task_type="simulate")
     def submit_simulation(self):
         """Submit a new simulation to check results from sampling/gather new training data"""
+        self.logger.info('TIMING - Start submit_simulation')
 
         # Get a simulation to run
         to_run = None
@@ -491,64 +621,117 @@ class Thinker(BaseThinker):
         while to_run is None:
             self.has_tasks.wait()
             with self.task_queue_lock:  # Wait for another thread to add structures
-                if len(self.task_queue_audit) > 0:
-                    to_run = self.task_queue_audit.pop(0)  # Get the one off the front of the list
-                    task_type = 'audit'
-                elif len(self.task_queue_active) > 0:
-                    to_run = self.task_queue_active.popleft()  # Get the most recent one
-                    task_type = 'active'
-                else:
-                    self.logger.info('No tasks are available to run. Waiting...')
-                    self.has_tasks.clear()  # We don't have any tasks to run
+                task_type = None
+
+                # Enumerate the lists to choose from
+                list_choices = [
+                    ('audit', self.task_queue_audit, lambda: self.task_queue_audit.pop(0)),
+                    ('active', self.task_queue_active, self.task_queue_active.popleft),
+                ]
+
+                shuffle(list_choices)  # Shuffle them
+                for _task_type, _task_list, _task_pull in list_choices:  # Iterate in the random order
+                    if len(_task_list) > 0:
+                        to_run = _task_pull()
+                        task_type = _task_type
+                        self._log_queue_sizes()
+                        break
+
+            # If task_type is None, neither were picked
+            if task_type is None:
+                self.logger.info('No tasks are available to run. Waiting ...')
+                self.has_tasks.clear()  # We don't have any tasks to run
 
         # Submit it
         self.logger.info(f'Selected a {task_type} to run next')
-        self.queues.send_inputs(to_run.atoms, method='run_calculator', topic='simulate',
+        atoms = to_run.atoms
+        atoms.set_center_of_mass([0, 0, 0])
+        xyz = write_to_string(atoms, 'xyz')
+        self.queues.send_inputs(xyz, method='run_calculator', topic='simulate',
+                                keep_inputs=True,  # The XYZ file is not big
                                 task_info={'traj_id': to_run.traj_id, 'task_type': task_type,
-                                           'ml_energy': to_run.ml_eng})
+                                           'ml_energy': to_run.ml_eng, 'xyz': xyz})
+        self.logger.info('TIMING - Finish submit_simulation')
 
     @result_processor(topic='simulate')
     def store_simulation(self, result: Result):
         """Store the results from a simulation"""
-        self.rec.release('simulate', 1)
-
+        self.logger.info('TIMING - Start store_simulation')
+        
         # Get the associated trajectory
         traj_id = result.task_info['traj_id']
-        traj = self.search_space[traj_id]
         self.logger.info(f'Received a simulation from trajectory {traj_id}. Success: {result.success}')
 
-        # Write output to disk regardless of whether we were successful
-        with open(self.out_dir / 'simulation-result.json', 'a') as fp:
-            print(result.json(exclude={'value', 'inputs'}), file=fp)
+        # Reallocate resources if the task queue is getting too small
+        if len(self.task_queue_audit) < self.n_qc_workers and \
+                self.rec.allocated_slots('simulate') > 0 and \
+                not self.reallocating.is_set():
+            self.reallocating.set()
+            self.logger.info('Running low on simulation tasks. Reallocating to sampling')
+            self.rec.reallocate('simulate', 'sample', 1, block=False, callback=self.reallocating.clear)
+        self.rec.release('simulate', 1)
+
+        # Count the completed calculation
+        self.num_complete += 1
+        self.logger.info(f'Evaluated {self.num_complete}/{self.num_to_run} structures')
+        if self.num_complete >= self.num_to_run:
+            self.done.set()
 
         # Store the result in the database if successful
         task_type = result.task_info['task_type']
+        proxy = result.value
         if result.success:
+            # Store the simulation energy for later analysis
+            atoms: ase.Atoms = read_from_string(result.value, 'json')
+            dft_energy = atoms.get_potential_energy()
+            result.task_info['dft_energy'] = dft_energy
+
+            # See how things compared to 
+            ml_eng = result.task_info['ml_energy']
+            difference = abs(ml_eng - dft_energy) / len(atoms)
+            result.task_info['difference'] = difference
+
             # If an audit calculation, check whether the energy is close to the ML prediction
-            atoms: ase.Atoms = result.value
             if task_type == 'audit':
-                ml_eng = result.task_info['ml_energy']
-                difference = abs(ml_eng - atoms.get_potential_energy()) / len(atoms)
+                traj = self.to_audit.pop(traj_id)
                 was_successful = difference < self.energy_tolerance
                 traj.set_validation(was_successful)
-                self.logger.info(f'Audit for {traj_id} complete. Result: {was_successful}.'
-                                 f' Difference: {difference:.3f} eV/atom')
+                self.logger.info(f'Audit for run of {traj.last_run_length} steps for {traj_id} complete.'
+                                 f' Result: {was_successful}. Difference: {difference:.3f} eV/atom')
+
+                # Update the audit history
+                self.audit_results.append(difference / traj.last_run_length)
+
+                # Add the trajectory back to the list to sample from
+                self.search_space.append(traj)  # Put it to the back of the list
+            else:
+                # Just print the performance
+                self.logger.info(f'Difference between ML and DFT: {difference:.3f} eV/atom')
 
             # Store in the training set
             with connect(self.db_path) as db:
                 db.write(atoms, runtime=result.time_running)
-            self.num_complete += 1
-            self.logger.info(f'Finished {self.num_complete}/{self.num_to_run} structures')
 
             # Trigger actions based on number of tasks completed
             if self.num_complete % self.retrain_freq == 0:
-                self.logger.info('Triggering training to restart (if not already ongoing)')
-                self.start_training.set()
-            if self.num_complete >= self.num_to_run:
-                self.done.set()
+                if self.training_complete.is_set():
+                    self.logger.info('Sufficient data collected to retrain. Triggering training to restart.')
+                    self.start_training.set()
+                else:
+                    self.logger.info('Sufficient data collected to retrain, but training is still underway')
 
         elif task_type == 'audit':
+            # If the calculation failed, we mark the validation as failed
+            traj = self.to_audit.pop(traj_id)
             traj.set_validation(False)
+
+            # Add a large error value to the queue
+            self.audit_results.append(10 / traj.last_run_length)  # 10 eV/atom is much larger than our typical error
+
+        # Write output to disk regardless of whether we were successful
+        _get_proxy_stats(proxy, result)
+        with open(self.out_dir / 'simulation-results.json', 'a') as fp:
+            print(result.json(exclude={'value', 'inputs'}), file=fp)
 
 
 if __name__ == '__main__':
@@ -566,6 +749,8 @@ if __name__ == '__main__':
                                       description='Information about how to run the tasks')
     group.add_argument("--ml-endpoint", help='FuncX endpoint ID for model training and interface')
     group.add_argument("--qc-endpoint", help='FuncX endpoint ID for quantum chemistry')
+    group.add_argument("--num-qc-workers", type=int, help="Number of workers performing chemistry tasks")
+    group.add_argument("--parsl", action='store_true', help='Use Parsl instead of FuncX')
 
     # Problem configuration
     group = parser.add_argument_group(title='Problem Definition',
@@ -580,15 +765,22 @@ if __name__ == '__main__':
     group = parser.add_argument_group(title="Training Settings")
     group.add_argument("--num-epochs", type=int, default=32, help="Maximum number of training epochs")
     group.add_argument("--ensemble-size", type=int, default=8, help="Number of models to train to create ensemble")
-    group.add_argument("--retrain-freq", type=int, default=10, help="Restart training after this many new training points")
+    group.add_argument("--retrain-freq", type=int, default=10,
+                       help="Restart training after this many new training points")
+    group.add_argument('--huber-deltas', type=float, default=None, nargs=2,
+                       help="Huber delta for the energy and forces")
 
     # Parameters related to sampling for new structures
     group = parser.add_argument_group(title="Sampling Settings")
+    #  TODO (wardlt): Switch to using a different endpoint for simulation and sampling tasks?
     group.add_argument("--num-samplers", type=int, default=1, help="Number of agents to use to sample structures")
-    group.add_argument("--run-length", type=int, default=1000, help="How many timesteps to run sampling calculations."
-                                                                    " Is the longest time between auditing states.")
-    group.add_argument("--energy-tolerance", type=float, default=0.01,
-                       help="Maximum allowable energy different to accept results of sampling run")
+    group.add_argument("--min-run-length", type=int, default=100,
+                       help="Minimum timesteps to run sampling calculations.")
+    group.add_argument("--max-run-length", type=int, default=5000,
+                       help="Maximum timesteps to run sampling calculations.")
+    group.add_argument("--num-frames", type=int, default=50, help="Number of frames to return per sampling run")
+    group.add_argument("--energy-tolerance", type=float, default=0.1,
+                       help="Maximum allowable energy different to accept results of sampling run.")
 
     # Parameters related to active learning
     group = parser.add_argument_group(title='Active Learning')
@@ -596,10 +788,6 @@ if __name__ == '__main__':
                        help='Number of structures to send together')
     group.add_argument('--infer-pool-size', type=int, default=2,
                        help='Number of inference chunks to complete before picking next tasks')
-
-    # Parameters related to gathering more training data
-    group = parser.add_argument_group(title="Simulation Settings")
-    group.add_argument("--num-simulators", default=1, type=int, help="Number of simulation workers")
 
     # Parameters related to ProxyStore
     known_ps = [None, 'redis', 'file', 'globus']
@@ -614,18 +802,23 @@ if __name__ == '__main__':
                        help='Min size in bytes for transferring objects via ProxyStore')
     group.add_argument('--ps-globus-config', default=None,
                        help='Globus Endpoint config file to use with the ProxyStore Globus backend')
+    group.add_argument('--no-proxies', action='store_true', 
+                       help='Skip making any proxies.')
 
     # Parse the arguments
     args = parser.parse_args()
     run_params = args.__dict__
 
-    # Load in the model
-    starting_model = torch.load(args.starting_model, map_location='cpu')
-
     # Check that the dataset exists
     with connect(args.training_set) as db:
         assert len(db) > 0
         pass
+
+    # Get the hash of the training data and model
+    with open(args.training_set, 'rb') as fp:
+        run_params['data_hash'] = hashlib.sha256(fp.read()).hexdigest()
+    with open(args.starting_model, 'rb') as fp:
+        run_params['model_hash'] = hashlib.sha256(fp.read()).hexdigest()
 
     # Prepare the output directory and logger
     start_time = datetime.utcnow()
@@ -639,9 +832,29 @@ if __name__ == '__main__':
 
     # Set up the logging
     handlers = [logging.FileHandler(out_dir / 'runtime.log'), logging.StreamHandler(sys.stdout)]
+
+
+    class ParslFilter(logging.Filter):
+        """Filter out Parsl debug logs"""
+
+        def filter(self, record):
+            return not (record.levelno == logging.DEBUG and '/parsl/' in record.pathname)
+
+
+    for h in handlers:
+        h.addFilter(ParslFilter())
+
     logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                         level=logging.INFO, handlers=handlers)
-    logging.info(f'Run directory: {out_dir}')
+
+    logger.info(f'Run directory: {out_dir}')
+    with open(out_dir / 'runparams.json', 'w') as fp:
+        json.dump(run_params, fp)
+
+    # Load in the model
+    starting_model = torch.load(args.starting_model, map_location='cpu')
+    logger.info(f'Loaded model from {Path(args.starting_model).resolve()}')
+    shutil.copyfile(args.starting_model, out_dir / 'starting_model.pth')
 
     # Make the PS scratch directory
     ps_file_dir = out_dir / 'proxy-store'
@@ -661,7 +874,10 @@ if __name__ == '__main__':
         endpoints = ps.store.globus.GlobusEndpoints.from_json(args.ps_globus_config)
         ps.store.init_store(ps.store.STORES.GLOBUS, name='globus', endpoints=endpoints, stats=True, timeout=600)
     ps_names = {'simulate': args.simulate_ps_backend, 'sample': args.sample_ps_backend,
-                'train': args.train_ps_backend}
+                'train': args.train_ps_backend, 'infer': args.train_ps_backend}
+    if args.no_proxies:
+        ps_names = {}
+        logger.info('Not making any proxies')
 
     # Connect to the redis server
     client_queues, server_queues = make_queue_pairs(args.redishost,
@@ -673,23 +889,39 @@ if __name__ == '__main__':
                                                     proxystore_name=ps_names,
                                                     proxystore_threshold=args.ps_threshold)
 
-    # Apply wrappers to functions that will be used to fix certain requirments
+    # Apply wrappers to functions that will be used to fix certain requirements
     def _wrap(func, **kwargs):
         out = partial(func, **kwargs)
         update_wrapper(out, func)
         return out
 
 
-    my_train_schnet = _wrap(train_schnet, num_epochs=args.num_epochs, device='cuda')
+    my_train_schnet = _wrap(train_schnet, num_epochs=args.num_epochs, device='cuda',
+                            learning_rate=5e-4, batch_size=64, patience=8, reset_weights=False,
+                            huber_deltas=args.huber_deltas)
     my_eval_schnet = _wrap(evaluate_schnet, device='cuda')
-    my_run_dynamics = _wrap(run_dynamics, timestep=0.1, steps=args.run_length, log_interval=100)
-    my_run_simulation = _wrap(run_calculator, calc=calc)
+    my_run_dynamics = _wrap(run_dynamics, timestep=0.1, device='cpu')
+    my_run_simulation = _wrap(run_calculator, calc=calc, temp_path=str(out_dir.absolute()))
 
     # Create the task server
-    fx_client = FuncXClient()  # Authenticate with FuncX
-    task_map = dict((f, args.ml_endpoint) for f in [my_train_schnet, my_eval_schnet])
-    task_map.update(dict((f, args.qc_endpoint) for f in [my_run_dynamics, my_run_simulation]))
-    doer = FuncXTaskServer(task_map, fx_client, server_queues)
+    if args.parsl:
+        from config import theta_debug_and_lambda
+        from colmena.task_server import ParslTaskServer
+
+        # Create the resource configuration
+        config = theta_debug_and_lambda(str(out_dir))
+
+        # Assign tasks to the appropriate executor
+        methods = [(f, {'executors': ['v100']}) for f in [my_train_schnet, my_eval_schnet]]
+        methods.extend([(f, {'executors': ['knl']}) for f in [my_run_simulation, my_run_dynamics]])
+
+        # Create the server
+        doer = ParslTaskServer(methods, server_queues, config)
+    else:
+        fx_client = FuncXClient()  # Authenticate with FuncX
+        task_map = dict((f, args.ml_endpoint) for f in [my_train_schnet, my_eval_schnet])
+        task_map.update(dict((f, args.qc_endpoint) for f in [my_run_simulation, my_run_dynamics]))
+        doer = FuncXTaskServer(task_map, fx_client, server_queues)
 
     # Create the thinker
     thinker = Thinker(
@@ -702,9 +934,11 @@ if __name__ == '__main__':
         infer_pool_size=args.infer_pool_size,
         n_to_run=args.num_to_run,
         n_models=args.ensemble_size,
-        n_samplers=args.num_samplers,
-        n_simulators=args.num_simulators,
+        n_qc_workers=args.num_qc_workers,
         energy_tolerance=args.energy_tolerance,
+        min_run_length=args.min_run_length,
+        max_run_length=args.max_run_length,
+        samples_per_run=args.num_frames,
         retrain_freq=args.retrain_freq,
         ps_names=ps_names
     )

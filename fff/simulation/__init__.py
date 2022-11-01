@@ -47,7 +47,11 @@ def _run_calculator(xyz: str, calc: Calculator | dict, temp_path: Optional[str] 
 
         # Run the calculation
         atoms.calc = calc
-        atoms.get_forces()
-        atoms.get_potential_energy()
-
+        try:
+            atoms.get_forces()
+            atoms.get_potential_energy()
+        except BaseException as exc:
+            raise ValueError(f'Calculation failed: {exc}')
+        
+        # Convert it to JSON
         return write_to_string(atoms, 'json')

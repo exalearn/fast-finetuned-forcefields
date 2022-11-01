@@ -1,6 +1,6 @@
 """Utilities for using models based on SchNet"""
 from tempfile import TemporaryDirectory
-from typing import Union, List, Tuple
+from typing import Union, List, Tuple, Optional, Dict
 from time import monotonic
 from pathlib import Path
 from io import BytesIO
@@ -100,6 +100,7 @@ def ase_to_spkdata(atoms: List[ase.Atoms], path: Path) -> AtomsData:
         A link to the database
     """
 
+    assert not Path(path).exists(), 'Path already exists'
     db = AtomsData(str(path), available_properties=['energy', 'forces'])
 
     # Get the properties as dictionaries
@@ -197,10 +198,10 @@ def train_schnet(model: Union[TorchMessage, torch.nn.Module, Path],
                  validation_split: float = 0.1,
                  random_state: int = 1,
                  learning_rate: float = 1e-3,
-                 reset_weights: bool = True,
+                 reset_weights: bool = False,
+                 huber_deltas: Optional[Tuple[float, float]] = None,
                  patience: int = None,
-                 timeout: float = None) -> Union[Tuple[TorchMessage, pd.DataFrame],
-                                                 Tuple[TorchMessage, pd.DataFrame, List[float]]]:
+                 timeout: float = None) -> Tuple[TorchMessage, pd.DataFrame]:
     """Train a SchNet model
 
     Args:
@@ -213,12 +214,13 @@ def train_schnet(model: Union[TorchMessage, torch.nn.Module, Path],
         random_state: Random seed used for generating validation set and bootstrap sampling
         learning_rate: Initial learning rate for optimizer
         reset_weights: Whether to reset the weights before training
+        huber_deltas: Deltas used in a Huber loss function for energy and force.
+            Default is to use the mean-squared loss
         patience: Patience until learning rate is lowered. Default: epochs / 8
         timeout: Maximum training time in seconds
     Returns:
         - model: Retrained model
         - history: Training history
-        - test_pred: Predictions on ``test_set``, if provided
     """
 
     # Make sure the models are converted to Torch models
@@ -240,35 +242,57 @@ def train_schnet(model: Union[TorchMessage, torch.nn.Module, Path],
     valid = [a for a, x in zip(database, train_split) if not x]
 
     # Start the training process
-    with TemporaryDirectory() as td:
+    with TemporaryDirectory(prefix='spk') as td:
         # Save the data to an ASE Atoms database
         train_file = Path(td) / 'train_data.db'
         train_db = ase_to_spkdata(train, train_file)
-        train_loader = AtomsLoader(train_db, batch_size=batch_size, shuffle=True)
+        train_loader = AtomsLoader(train_db, batch_size=batch_size, shuffle=True, num_workers=8,
+                                   pin_memory=device != "cpu")
 
         valid_file = Path(td) / 'valid_data.db'
         valid_db = ase_to_spkdata(valid, valid_file)
-        valid_loader = AtomsLoader(valid_db, batch_size=batch_size)
+        valid_loader = AtomsLoader(valid_db, batch_size=batch_size, num_workers=8, pin_memory=device != "cpu")
 
         # Make the trainer
         opt = optim.Adam(model.parameters(), lr=learning_rate)
 
-        # Make a loss function based on force and energy
-        rho_tradeoff = 0.1  # Between force and energy
+        # tradeoff
+        rho_tradeoff = 0.9
 
-        def loss(batch, result):
-            # compute the mean squared error on the energies
-            diff_energy = batch['energy'] - result['energy']
-            err_sq_energy = torch.mean(diff_energy ** 2)
+        # loss function
+        if huber_deltas is None:
+            # Use mean-squared loss
+            def loss(batch, result):
+                # compute the mean squared error on the energies
+                diff_energy = batch['energy'] - result['energy']
+                err_sq_energy = torch.mean(diff_energy ** 2)
 
-            # compute the mean squared error on the forces
-            diff_forces = batch['forces'] - result['forces']
-            err_sq_forces = torch.mean(diff_forces ** 2)
+                # compute the mean squared error on the forces
+                diff_forces = batch['forces'] - result['forces']
+                err_sq_forces = torch.mean(diff_forces ** 2)
 
-            # build the combined loss function
-            err_sq = rho_tradeoff * err_sq_energy + (1 - rho_tradeoff) * err_sq_forces
+                # build the combined loss function
+                err_sq = rho_tradeoff * err_sq_energy + (1 - rho_tradeoff) * err_sq_forces
 
-            return err_sq
+                return err_sq
+        else:
+            # Use huber loss
+            delta_energy, delta_force = huber_deltas
+
+            def loss(batch: Dict[str, torch.Tensor], result):
+                # compute the mean squared error on the energies per atom
+                n_atoms = batch['_atom_mask'].sum(axis=1)
+                err_sq_energy = torch.nn.functional.huber_loss(batch['energy'] / n_atoms,
+                                                               result['energy'].float() / n_atoms,
+                                                               delta=delta_energy)
+
+                # compute the mean squared error on the forces
+                err_sq_forces = torch.nn.functional.huber_loss(batch['forces'], result['forces'], delta=delta_force)
+
+                # build the combined loss function
+                err_sq = rho_tradeoff * err_sq_energy + (1 - rho_tradeoff) * err_sq_forces
+
+                return err_sq
 
         metrics = [
             spk.metrics.MeanAbsoluteError('energy'),
