@@ -156,10 +156,10 @@ if __name__ == "__main__":
                 partition='regular',
                 account='m1513',
                 launcher=SimpleLauncher(),
-                walltime='36:00:00',
+                walltime='48:00:00',
                 nodes_per_block=args.num_nodes * args.num_parallel,
-                init_blocks=0,
-                min_blocks=1,
+                init_blocks=1,
+                min_blocks=0,
                 max_blocks=1,  # Maximum number of jobs
                 scheduler_options='#SBATCH --image=ghcr.io/nwchemgit/nwchem-702.mpipr.nersc:latest\n#SBATCH -C knl',
                 worker_init=f'''
@@ -220,6 +220,8 @@ pwd
         exc = future.exception()
         if exc is not None:
             print(f'Failure for {future.task_def["args"][0].info["filename"]}. {str(exc)}')
+            with open('failures.json', 'a') as fp:
+                print(json.dumps({'name', 
             n_failures += 1
             continue
         atoms, runtime = future.result()
