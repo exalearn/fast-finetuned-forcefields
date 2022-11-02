@@ -136,14 +136,13 @@ def train_schnet(model: SchNet,
         model.to(device)
         start_time = time.perf_counter()
         for epoch in range(num_epochs):
-            # Get the
-
             # Iterate over all batches in the training set
             optimizer.zero_grad()
             train_losses = defaultdict(list)
             for batch in train_loader:
                 batch.to(device)
-                # TODO (wardlt): The original implementation made a second data loader. I don't know what that's about
+
+                # Compute the energy and forces
                 energy, force = _eval_batch(model, batch)
 
                 # Get the forces in energy and forces
