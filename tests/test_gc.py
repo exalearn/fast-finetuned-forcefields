@@ -4,7 +4,7 @@ from ase import build
 from pytest import fixture
 
 from fff.learning.gc.data import AtomsDataset
-from fff.learning.gc.functions import evaluate_schnet
+from fff.learning.gc.functions import evaluate_schnet, train_schnet
 from fff.learning.gc.models import SchNet
 
 
@@ -28,3 +28,8 @@ def test_run(model, tmp_path):
     assert len(energies) == 4
     assert forces[0].shape == (3, 3)
     assert len(forces)
+
+
+def test_train(model, example_waters):
+    model, log = train_schnet(model, example_waters[:8], example_waters[8:], 8)
+    assert len(log) == 8
