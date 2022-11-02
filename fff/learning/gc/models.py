@@ -14,36 +14,6 @@ from torch_scatter.scatter import scatter_add
 logger = logging.getLogger(__name__)
 
 
-def load_model(
-        path: str | Path, model_cat: str, eval_mode: bool = False, device: str = 'cpu', frozen: bool = False, **kwargs) -> Union['SchNet', 'MultiFiSchNet']:
-    """Load trained model
-
-    Keyword arguments are passed to the model loader
-
-    Args:
-        path: Path to the model to be loaded
-        model_cat: Category of the model. Either "single" or "multifi". "multifi" will create a multi-fidelity SchNet model
-        eval_mode: Whether to move the model into inference model
-        device: Device on which to load the model
-        frozen: Whether to hold weights in layers constant during training
-    Returns:
-        Loaded model
-    """
-    if model_cat == 'multifi':
-        net = MultiFiSchNet(path, device=device)
-    elif model_cat == "single":
-        net = load_pretrained_model(path, device=device, frozen=frozen, **kwargs)
-    else:
-        raise ValueError(f'Model category not implemented: {model_cat}')
-
-    if eval_mode:
-        # set to eval mode
-        net.eval()
-        logger.debug('Set model to evaluation model')
-
-    return net
-
-
 def load_pretrained_model(
         path: str | Path,
         mean: float,
@@ -273,57 +243,3 @@ class SchNet(nn.Module):
         N = (target != 0.0).to(loss.dtype).sum()
         loss = loss / N
         return identity_loss(loss, reduction="none")
-
-
-class MultiFiSchNet(torch.nn.Module):
-    def __init__(self,
-                 path: str,
-                 device: str = 'cpu',
-                 **kwargs):
-        """
-        :param path (str): Path to trained model
-        :param device (str): Device to run model on ['cpu', 'cuda']
-        """
-        super().__init__()
-
-        # load pretrained model
-        self.lowfi_model = load_pretrained_model(path, model_cat='finetune', frozen=True, device=device, **kwargs)
-        clip_value = kwargs.get('clip_value', 1e-6)
-
-        # freeze lowfi model layers
-        for param in self.lowfi_model.parameters():
-            param.requires_grad = False
-
-        # load empty model with smaller architecture
-        state = torch.load(path, map_location=torch.device(device))
-        num_gaussians = state['basis_expansion.offset'].shape[0]
-        num_filters = state['interactions.0.mlp.0.weight'].shape[0]
-        num_interactions = len([key for key in state.keys() if '.lin.bias' in key])
-
-        self.dif_model = SchNet(num_features=int(num_filters / 2),
-                                num_interactions=int((num_interactions + 1) / 2),
-                                num_gaussians=num_gaussians,
-                                cutoff=6.0)
-
-        self.dif_model.to(device)
-
-        # correlation/sum layer 
-        self.correlation = nn.Linear(1, 1, bias=False, device=device)
-
-        for p in self.correlation.parameters():
-            p.register_hook(lambda grad: torch.clamp(grad, -clip_value, clip_value))
-
-    def forward(self, data):
-        """
-        Forward pass of the SchNet model
-        :param data: data from data loader
-        """
-
-        y_low = self.correlation(self.lowfi_model(data).view(-1, 1)).T[0]
-        y_dif = self.dif_model(data)
-
-        # interleave y_low and y_dif
-        y = torch.stack((y_low, y_dif), dim=1).view(-1, 2)
-        y = torch.sum(y, dim=1)
-
-        return y

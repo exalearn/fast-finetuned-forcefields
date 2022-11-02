@@ -5,12 +5,19 @@ from pytest import fixture
 
 from fff.learning.gc.data import AtomsDataset
 from fff.learning.gc.functions import evaluate_schnet, train_schnet
-from fff.learning.gc.models import SchNet
+from fff.learning.gc.models import SchNet, load_pretrained_model
 
 
 @fixture
 def model() -> SchNet:
     return SchNet(neighbor_method='radius')
+
+
+def test_load_schnet(test_file_path):
+    """Test loading a model from disk"""
+    model = load_pretrained_model(test_file_path / 'example-schnet.pt', 1, 0.1, 10)
+    assert model.mean == 1.
+    assert model.std == 0.1
 
 
 def test_data_loader(example_waters, tmp_path):
