@@ -79,7 +79,7 @@ class AtomsDataset(InMemoryDataset):
                     z = torch.tensor(atomic_number, dtype=torch.long)
                     x = F.one_hot(torch.tensor(type_idx, dtype=torch.long), num_classes=len(types))
 
-                    data = Data(x=x, z=z, pos=pos, y=y, f=f, size=size, name=name)
+                    data = Data(x=x, z=z, pos=pos, y=y, f=f, n_atoms=len(mol), size=size, name=name)
 
                     if self.pre_filter is not None and not self.pre_filter(data):
                         continue
