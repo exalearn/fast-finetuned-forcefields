@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 
 def load_pretrained_model(
         path: str | Path,
-        mean: float,
-        std: float,
-        clip_value: float,
+        mean: Optional[float] = None,
+        std: Optional[float] = None,
+        clip_value: Optional[float] = None,
         load_state: bool = True,
         device: str = 'cpu',
         frozen: bool = False
@@ -63,7 +63,7 @@ def load_pretrained_model(
     net.to(device)
 
     # register backward hook --> gradient clipping
-    if not frozen:
+    if clip_value is not None:
         for p in net.parameters():
             p.register_hook(lambda grad: torch.clamp(grad, -clip_value, clip_value))
 
