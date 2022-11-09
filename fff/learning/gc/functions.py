@@ -50,11 +50,11 @@ def evaluate_schnet(model: SchNet,
             batch.to(device)
 
             # Get the energies then compute forces with autograd
-            energ_batch, force_batch = _eval_batch(model, batch)
+            energ_batch, force_batch = eval_batch(model, batch)
 
             # Split the forces
-            n_atoms = batch.n_atoms.detach().numpy()
-            forces_np = force_batch.detach().cpu().numpy()
+            n_atoms = batch.n_atoms.cpu().detach().numpy()
+            forces_np = force_batch.cpu().detach().cpu().numpy()
             forces_per = np.split(forces_np, np.cumsum(n_atoms)[:-1])
 
             # Add them to the output lists
@@ -66,7 +66,7 @@ def evaluate_schnet(model: SchNet,
     return energies, forces
 
 
-def _eval_batch(model: SchNet, batch: Data) -> (torch.Tensor, torch.Tensor):
+def eval_batch(model: SchNet, batch: Data) -> (torch.Tensor, torch.Tensor):
     """Get the energies and forces for a certain batch of molecules
 
     Args:
@@ -77,7 +77,7 @@ def _eval_batch(model: SchNet, batch: Data) -> (torch.Tensor, torch.Tensor):
     """
     batch.pos.requires_grad = True
     energ_batch = model(batch)
-    force_batch = torch.autograd.grad(energ_batch, batch.pos, grad_outputs=torch.ones_like(energ_batch), retain_graph=True)[0]
+    force_batch = -torch.autograd.grad(energ_batch, batch.pos, grad_outputs=torch.ones_like(energ_batch), retain_graph=True)[0]
     return energ_batch, force_batch
 
 
@@ -89,6 +89,8 @@ def train_schnet(model: SchNet,
                  device: str = 'cpu',
                  batch_size: int = 32,
                  learning_rate: float = 1e-3,
+                 huber_deltas: (float, float) = (0.5, 1),
+                 energy_weight: float = 0.9,
                  reset_weights: bool = False,
                  patience: int = None) -> Tuple[SchNet, pd.DataFrame]:
     """Train a SchNet model
@@ -101,12 +103,17 @@ def train_schnet(model: SchNet,
         device: Device (e.g., 'cuda', 'cpu') used for training
         batch_size: Batch size during training
         learning_rate: Initial learning rate for optimizer
+        huber_deltas: Delta parameters for the loss functions for energy and force
+        energy_weight: Amount of weight to use for the energy part of the loss function
         reset_weights: Whether to reset the weights before training
         patience: Patience until learning rate is lowered. Default: epochs / 8
     Returns:
         - model: Retrained model
         - history: Training history
     """
+
+    # Unpack some inputs
+    huber_eng, huber_force = huber_deltas
 
     # If desired, re-initialize weights
     if reset_weights:
@@ -137,18 +144,19 @@ def train_schnet(model: SchNet,
         start_time = time.perf_counter()
         for epoch in range(num_epochs):
             # Iterate over all batches in the training set
-            optimizer.zero_grad()
             train_losses = defaultdict(list)
             for batch in train_loader:
                 batch.to(device)
 
+                optimizer.zero_grad()
+
                 # Compute the energy and forces
-                energy, force = _eval_batch(model, batch)
+                energy, force = eval_batch(model, batch)
 
                 # Get the forces in energy and forces
-                energy_loss = F.mse_loss(energy, batch.y)
-                force_loss = F.mse_loss(force, batch.f)
-                total_loss = energy_loss + force_loss
+                energy_loss = F.huber_loss(energy / batch.n_atoms, batch.y / batch.n_atoms, reduction='mean', delta=huber_eng)
+                force_loss = F.huber_loss(force, batch.f, reduction='mean', delta=huber_force)
+                total_loss = energy_weight * energy_loss + (1 - energy_weight) * force_loss
 
                 # Iterate backwards
                 total_loss.backward()
@@ -166,10 +174,13 @@ def train_schnet(model: SchNet,
             # Get the validation loss
             valid_losses = defaultdict(list)
             for batch in valid_loader:
-                energy, force = _eval_batch(model, batch)
-                energy_loss = F.mse_loss(energy, batch.y)
-                force_loss = F.mse_loss(force, batch.f)
-                total_loss = energy_loss + force_loss
+                batch.to(device)
+                energy, force = eval_batch(model, batch)
+
+                # Get the loss of this batch
+                energy_loss = F.huber_loss(energy / batch.n_atoms, batch.y / batch.n_atoms, reduction='mean', delta=huber_eng)
+                force_loss = F.huber_loss(force, batch.f, reduction='mean', delta=huber_force)
+                total_loss = energy_weight * energy_loss + (1 - energy_weight) * force_loss
 
                 with torch.no_grad():
                     valid_losses['valid_loss_force'].append(force_loss.item())
