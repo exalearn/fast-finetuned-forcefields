@@ -5,10 +5,12 @@ It is presently hard-coded to run on Cori KNL nodes. You will need to change the
 """
 
 from argparse import ArgumentParser
+from pathlib import Path
 from typing import Iterable, Tuple, Optional
-from concurrent.futures import as_completed, Future
+from concurrent.futures import as_completed
+import json
 
-from parsl import ThreadPoolExecutor
+import pandas as pd
 from parsl.dataflow.futures import AppFuture
 from parsl.executors import HighThroughputExecutor
 from parsl.launchers import SimpleLauncher
@@ -16,7 +18,7 @@ from parsl.providers import SlurmProvider
 from ase.calculators.nwchem import NWChem
 from ase.db import connect
 from ase.io import read
-from io import TextIOWrapper
+from io import TextIOWrapper, StringIO
 from tqdm import tqdm
 import zipfile
 import ase
@@ -41,36 +43,39 @@ def run_nwchem(atoms: ase.Atoms, calc: NWChem, temp_path: Optional[str] = None) 
     Returns:
         Atoms after the calculation
     """
-    from tempfile import TemporaryDirectory, mkdtemp
+    from tempfile import mkdtemp
+    from shutil import rmtree
     import time
     import os
 
-    with TemporaryDirectory(dir=temp_path, prefix='nwc') as temp_dir:
-#        temp_dir = mkdtemp(dir=temp_path, prefix='pnwc')  # Uncomment to make the temporary directory persistant
-        # Execute from the temp so that the nwchem.nwi doesn't overwrite another's
-        os.chdir(temp_dir)
-        
-        # Update the scratch directory
-        calc.scratch = str(temp_dir)
-        calc.perm = str(temp_dir)
+    temp_dir = mkdtemp(dir=temp_path, prefix='nwc')
+    
+    # Execute from the temp so that the nwchem.nwi doesn't overwrite another's
+    os.chdir(temp_dir)
 
-        # Run the calculation
-        start_time = time.perf_counter()
-        atoms.set_calculator(calc)
-        atoms.get_forces()
-        run_time = time.perf_counter() - start_time
+    # Update the scratch directory
+    calc.scratch = str(temp_dir)
+    calc.perm = str(temp_dir)
 
-        return atoms, run_time
+    # Run the calculation
+    start_time = time.perf_counter()
+    atoms.set_calculator(calc)
+    atoms.get_forces()
+    run_time = time.perf_counter() - start_time
+    
+    rmtree(temp_dir)
+
+    return atoms, run_time
 
 
-def generate_structures() -> Iterable[Tuple[str, ase.Atoms]]:
+def generate_structures_from_zip(path: Path) -> Iterable[Tuple[str, ase.Atoms]]:
     """Iterate over all structures in Henry's ZIP file
 
     Yields:
         Tuple of (filename, ase.Atoms) object
     """
 
-    with zipfile.ZipFile('data/initial_MP2.zip') as zp:
+    with zipfile.ZipFile(path) as zp:
         for info in zp.infolist():
             if info.filename.endswith(".xyz"):
                 with zp.open(info, mode='r') as fp:
@@ -87,20 +92,34 @@ if __name__ == "__main__":
     parser.add_argument('--basis', default='aug-cc-pvdz', help='Basis set to use for all atoms')
     parser.add_argument('--max-to-run', default=None, type=int, help='Maximum number of tasks to run')
     parser.add_argument('--temp-dir', default=None, help='Where to store the temporary files')
+    parser.add_argument('--structures', default='data/initial_MP2.zip', help='Path of initial structures to use')
     args = parser.parse_args()
 
     # Make a generator over structures to read
-    strc_iter = generate_structures()
+    if args.structures.endswith('zip'):
+        strc_iter = generate_structures_from_zip(args.structures)
+    elif args.structures.endswith('csv'):
+        strcs = pd.read_csv(args.structures).sample(frac=1)  # Shuffle for better utilization
+        filenames = strcs['coord_hash'].apply(lambda x: f'hydrodb_{x[:6]}.xyz')
+        atoms = strcs['xyz'].apply(lambda x: read(StringIO(x), format='xyz'))
+        for a in atoms:
+            a.set_center_of_mass([0., 0., 0.])
+        strc_iter = zip(filenames, atoms)
+    else:
+        raise ValueError(f'File type for {args.structures} is not supported')
 
     # Make the NWChem calculator
     ranks_per_node = cores_per_node
     integral_caching = {
-        'memsize': int(0.5 * memory_per_node / ranks_per_node * 1e9 // 8),  # To 64-bit words (GB -> bytes),
-        'filesize': int(disk_space // args.num_parallel // ranks_per_node * 1e9 // 8)  # Shared amongst parallel workers
+        # Disk space is in 8byte words per process. I put the 32 so that we temporarily use more scratch than allowed
+        'filesize': 32 * (disk_space * 1024 ** 2)  // 8 // (ranks_per_node * args.num_nodes * args.num_parallel)
     }
-    calc = nwchem = NWChem(
-        memory=f'{memory_per_node / ranks_per_node:.1f} gb',
+    # Disk size is in MB per process
+    disk_per_mp2 = 32 * (disk_space * 1024) // (ranks_per_node * args.num_nodes * args.num_parallel)
+    calc = NWChem(
+        memory=f'{0.8 * memory_per_node / ranks_per_node:.1f} gb',
         basis={'*': args.basis},
+        basispar='spherical',
         set={
             'lindep:n_dep': 0,
             'cphf:maxsub': 95,
@@ -116,12 +135,12 @@ if __name__ == "__main__":
             'tol2e': '1d-15',
             'semidirect': integral_caching,
         },
-        mp2={'freeze': 'atomic'},
-        initwfc={
-            'scf': {
-                'semidirect': integral_caching
-            },
+        mp2={'freeze': 'atomic', 'scratchdisk': disk_per_mp2},
+        theory='mp2',
+        pretasks=[{
+            'theory': 'dft',
             'dft': {
+                'semidirect': integral_caching,
                 'xc': 'hfexch',
                 # 'convergence': {  # TODO (wardlt): Explore if there is a better value for the convergence
                 #     'energy': '1d-12',
@@ -135,7 +154,7 @@ if __name__ == "__main__":
                 'fock:densityscreen': 'f',
                 'lindep:n_dep': 0,
             }
-        },
+        }],
         # Note: Parsl sets --ntasks-per-node=1 in #SBATCH. For some reason, --ntasks in srun overrides it
         command=(f'srun -N {args.num_nodes} '
                  f'--ntasks={ranks_per_node * args.num_nodes} '
@@ -152,6 +171,7 @@ if __name__ == "__main__":
             label='launch_from_mpi_nodes',
             max_workers=args.num_parallel,
             cores_per_worker=1e-6,
+            start_method='fork',
             provider=SlurmProvider(
                 partition='regular',
                 account='m1513',
@@ -186,12 +206,12 @@ pwd
     )
     parsl.load(config)
 
-    print(f'Submitting from the ZIP file...')
+    print(f'Submitting structures...')
     n_skipped = 0
     with connect('initial.db', type='db') as db:
         # Submit structures to Parsl
         futures = []
-        for filename, atoms in generate_structures():
+        for filename, atoms in strc_iter:
             # Store some tracking information
             atoms.info['filename'] = filename
             atoms.info['basis'] = args.basis
@@ -219,9 +239,10 @@ pwd
         future: AppFuture = future
         exc = future.exception()
         if exc is not None:
+            filename = future.task_def["args"][0].info["filename"]
             print(f'Failure for {future.task_def["args"][0].info["filename"]}. {str(exc)}')
             with open('failures.json', 'a') as fp:
-                print(json.dumps({'name', 
+                print(json.dumps({'name': filename, 'error': str(exc)}), file=fp)
             n_failures += 1
             continue
         atoms, runtime = future.result()
