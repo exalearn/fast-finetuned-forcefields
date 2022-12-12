@@ -2,7 +2,7 @@
 
 # Test for the local system
 python run.py \
-    --ml-endpoint ae6479e9-61e6-4582-a34a-c17af560e535 \
+    --ml-endpoint db55e9cc-ec32-47d6-a6ff-ecd45776d276 \
     --qc-endpoint 698fba9a-4b12-4e0b-b83a-be6ded509946 \
     --training-set ../../notebooks/initial-database/initial-psi4-631g.db \
     --search-space ../../notebooks/initial-database/initial-psi4-631g.db \
