@@ -7,6 +7,11 @@ _my_path = Path(__file__).parent
 
 
 @fixture()
+def test_file_path() -> Path:
+    return _my_path / 'files'
+
+
+@fixture()
 def example_waters():
     with connect(_my_path / 'files' / 'test.db') as db:
         return [x.toatoms() for x in db.select('')]

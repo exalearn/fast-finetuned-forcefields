@@ -42,7 +42,7 @@ def test_train(example_waters, schnet):
     log = train_schnet(schnet, example_waters, 2)
     assert len(log) == 2
 
-    log = train_schnet(schnet, example_waters, 2, huber_deltas=(0.3, 3))
+    log = train_schnet(schnet, example_waters, 2, huber_deltas=(0.3, 3), device='cuda')
     assert len(log) == 2
 
 
