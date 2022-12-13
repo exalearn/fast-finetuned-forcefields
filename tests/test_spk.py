@@ -6,7 +6,7 @@ from ase import build
 import numpy as np
 from pytest import fixture
 
-from fff.learning.spk import ase_to_spkdata, train_schnet, evaluate_schnet, SPKCalculatorMessage
+from fff.learning.spk import ase_to_spkdata, SchnetPackForcefield, SPKCalculatorMessage
 from fff.sampling.md import MolecularDynamics
 
 
@@ -39,15 +39,17 @@ def test_db(example_waters, tmp_path):
 
 
 def test_train(example_waters, schnet):
-    log = train_schnet(schnet, example_waters, 2)
+    spk = SchnetPackForcefield()
+    msg, log = spk.train(schnet, example_waters[:8], example_waters[8:], 2)
     assert len(log) == 2
 
-    log = train_schnet(schnet, example_waters, 2, huber_deltas=(0.3, 3), device='cuda')
+    log = spk.train(schnet, example_waters[:8], example_waters[8:], 2, huber_deltas=(0.3, 3))
     assert len(log) == 2
 
 
 def test_run(example_waters, schnet):
-    energies, forces = evaluate_schnet(schnet, example_waters, batch_size=2)
+    spk = SchnetPackForcefield()
+    energies, forces = spk.evaluate(schnet, example_waters, batch_size=2)
     assert np.shape(energies) == (10,)
     assert np.shape(forces) == (10, 3, 3)
 
@@ -68,5 +70,3 @@ def test_ase(schnet):
     calc = pkl.loads(pkl.dumps(msg))
     traj = MolecularDynamics().run_sampling(h2o, 100, calc, timestep=0.1)
     assert len(traj) > 0
-
-

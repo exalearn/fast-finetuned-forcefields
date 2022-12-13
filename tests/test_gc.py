@@ -7,13 +7,18 @@ from pytest import fixture
 
 from fff.learning.gc.ase import SchnetCalculator
 from fff.learning.gc.data import AtomsDataset
-from fff.learning.gc.functions import evaluate_schnet, train_schnet
+from fff.learning.gc.functions import GCSchNetForcefield
 from fff.learning.gc.models import SchNet, load_pretrained_model
 
 
 @fixture
 def model() -> SchNet:
     return SchNet(neighbor_method='radius')
+
+
+@fixture()
+def ff():
+    return GCSchNetForcefield()
 
 
 def test_load_schnet(test_file_path):
@@ -32,16 +37,16 @@ def test_data_loader(example_waters, tmp_path):
     assert np.isclose(dataset[0].pos, pos).all()
 
 
-def test_run(model, tmp_path):
+def test_run(model, ff, tmp_path):
     water = build.molecule('H2O')
-    energies, forces = evaluate_schnet(model, [water] * 4)
+    energies, forces = ff.evaluate(model, [water] * 4)
     assert len(energies) == 4
     assert forces[0].shape == (3, 3)
     assert len(forces)
 
 
-def test_train(model, example_waters):
-    model, log = train_schnet(model, example_waters[:8], example_waters[8:], 8)
+def test_train(model, example_waters, ff):
+    model, log = ff.train(model, example_waters[:8], example_waters[8:], 8)
     assert len(log) == 8
 
 

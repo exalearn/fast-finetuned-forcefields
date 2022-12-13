@@ -3,7 +3,6 @@ from tempfile import TemporaryDirectory
 from typing import Union, List, Tuple, Optional, Dict
 from time import monotonic
 from pathlib import Path
-from io import BytesIO
 import pickle as pkl
 import os
 
@@ -16,44 +15,8 @@ import numpy as np
 import torch
 import ase
 
-
-class TorchMessage:
-    """Send a PyTorch object via pickle, enable loading on to target hardware"""
-
-    def __init__(self, model: torch.nn.Module):
-        """
-        Args:
-            model: Model to be sent
-        """
-        self.model = model
-        self._pickle = None
-
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        # Save the model with pickle
-        model_pkl = BytesIO()
-        torch.save(self.model, model_pkl)
-
-        # Store it
-        state['model'] = None
-        state['_pickle'] = model_pkl.getvalue()
-        return state
-
-    def get_model(self, map_location: Union[str, torch.device] = 'cpu'):
-        """Load the cached model into memory
-
-        Args:
-            map_location: Where to copy the device
-        Returns:
-            Deserialized model, moved to the target resource
-        """
-        if self.model is None:
-            self.model = torch.load(BytesIO(self._pickle), map_location=map_location)
-            self.model.to(map_location)
-            self._pickle = None
-        else:
-            self.model.to(map_location)
-        return self.model
+from fff.learning.util.messages import TorchMessage
+from .base import BaseLearnableForcefield, ModelMsgType
 
 
 class SPKCalculatorMessage:
@@ -141,195 +104,164 @@ class TimeoutHook(trn.Hook):
             trainer._stop = True
 
 
-def evaluate_schnet(model: Union[TorchMessage, torch.nn.Module, Path],
-                    atoms: List[ase.Atoms],
-                    batch_size: int = 64,
-                    device: str = 'cpu') -> Tuple[List[float], List[np.ndarray]]:
-    """Run inference for a series of structures
+class SchnetPackForcefield(BaseLearnableForcefield):
+    """Forcefield based on the SchNetPack implementation of SchNet"""
 
-    Args:
-        model: Model to evaluate. Either a SchNet model or the bytes corresponding to a serialized model
-        atoms: List of structures to evaluate
-        batch_size: Number of molecules to evaluate per batch
-        device: Device on which to run the computation
-    Returns:
-        - Energies for each inference
-        - Forces for each inference
-    """
+    def __init__(self, scratch_dir: Path | None = None, timeout: float = None):
+        """
 
-    # Make sure the models are converted to Torch models
-    if isinstance(model, TorchMessage):
-        model = model.get_model(map_location='cpu')
-    elif isinstance(model, (Path, str)):
-        model = torch.load(model, map_location='cpu')  # Load to main memory first
+        Args:
+            scratch_dir: Directory in which to cache converted data
+            timeout: Maximum training time
+        """
+        super().__init__(scratch_dir)
+        self.timeout = timeout
 
-    # Make the dataset
-    with TemporaryDirectory() as td:
+    def evaluate(self,
+                 model_msg: ModelMsgType,
+                 atoms: list[ase.Atoms],
+                 batch_size: int = 64,
+                 device: str = 'cpu') -> (list[float], list[np.ndarray]):
 
-        # Save the data to an ASE Atoms database
-        run_file = os.path.join(td, 'run_data.db')
-        db = AtomsData(run_file, available_properties=[])
-        db.add_systems(atoms, [{} for _ in atoms])
+        # Get the message
+        model_msg = self.get_model(model_msg)
 
-        # Build the data loader
-        loader = AtomsLoader(db, batch_size=batch_size)
+        # Make the dataset
+        with TemporaryDirectory(dir=self.scratch_dir, prefix='spk') as td:
+            # Save the data to an ASE Atoms database
+            run_file = os.path.join(td, 'run_data.db')
+            db = AtomsData(run_file, available_properties=[])
+            db.add_systems(atoms, [{} for _ in atoms])
 
-        # Run the models
-        energies = []
-        forces = []
-        model.to(device)  # Move the model to the device
-        for batch in loader:
-            # Push the batch to the device
-            batch = {k: v.to(device) for k, v in batch.items()}
+            # Build the data loader
+            loader = AtomsLoader(db, batch_size=batch_size)
 
-            # Run it and save results
-            pred = model(batch)
-            energies.extend(pred['energy'].detach().cpu().numpy()[:, 0].tolist())
-            forces.extend(pred['forces'].detach().cpu().numpy())
+            # Run the models
+            energies = []
+            forces = []
+            model_msg.to(device)  # Move the model to the device
+            for batch in loader:
+                # Push the batch to the device
+                batch = {k: v.to(device) for k, v in batch.items()}
 
-        return energies, forces
+                # Run it and save results
+                pred = model_msg(batch)
+                energies.extend(pred['energy'].detach().cpu().numpy()[:, 0].tolist())
+                forces.extend(pred['forces'].detach().cpu().numpy())
 
+            return energies, forces
 
-def train_schnet(model: Union[TorchMessage, torch.nn.Module, Path],
-                 database: List[ase.Atoms],
-                 num_epochs: int,
-                 device: str = 'cpu',
-                 batch_size: int = 32,
-                 validation_split: float = 0.1,
-                 random_state: int = 1,
-                 learning_rate: float = 1e-3,
-                 reset_weights: bool = False,
-                 huber_deltas: Optional[Tuple[float, float]] = None,
-                 patience: int = None,
-                 timeout: float = None) -> Tuple[TorchMessage, pd.DataFrame]:
-    """Train a SchNet model
+    def train(self,
+              model_msg: ModelMsgType,
+              train_data: list[ase.Atoms],
+              valid_data: list[ase.Atoms],
+              num_epochs: int,
+              device: str = 'cpu',
+              batch_size: int = 32,
+              learning_rate: float = 1e-3,
+              huber_deltas: (float, float) = (0.5, 1),
+              energy_weight: float = 0.9,
+              reset_weights: bool = False,
+              patience: int = None) -> (TorchMessage, pd.DataFrame):
 
-    Args:
-        model: Model to be retrained
-        database: Mapping of XYZ format structure to property
-        num_epochs: Number of training epochs
-        device: Device (e.g., 'cuda', 'cpu') used for training
-        batch_size: Batch size during training
-        validation_split: Fraction to training set to use for the validation loss
-        random_state: Random seed used for generating validation set and bootstrap sampling
-        learning_rate: Initial learning rate for optimizer
-        reset_weights: Whether to reset the weights before training
-        huber_deltas: Deltas used in a Huber loss function for energy and force.
-            Default is to use the mean-squared loss
-        patience: Patience until learning rate is lowered. Default: epochs / 8
-        timeout: Maximum training time in seconds
-    Returns:
-        - model: Retrained model
-        - history: Training history
-    """
+        # Make sure the models are converted to Torch models
+        model_msg = self.get_model(model_msg)
 
-    # Make sure the models are converted to Torch models
-    if isinstance(model, TorchMessage):
-        model = model.get_model(device)
-    elif isinstance(model, (Path, str)):
-        model = torch.load(model, map_location='cpu')  # Load to main memory first
+        # If desired, re-initialize weights
+        if reset_weights:
+            for module in model_msg.modules():
+                if hasattr(module, 'reset_parameters'):
+                    module.reset_parameters()
 
-    # If desired, re-initialize weights
-    if reset_weights:
-        for module in model.modules():
-            if hasattr(module, 'reset_parameters'):
-                module.reset_parameters()
+        # Start the training process
+        with TemporaryDirectory(dir=self.scratch_dir, prefix='spk') as td:
+            # Save the data to an ASE Atoms database
+            train_file = Path(td) / 'train_data.db'
+            train_db = ase_to_spkdata(train_data, train_file)
+            train_loader = AtomsLoader(train_db, batch_size=batch_size, shuffle=True, num_workers=8,
+                                       pin_memory=device != "cpu")
 
-    # Make the training and validation splits
-    rng = np.random.RandomState(random_state)
-    train_split = rng.rand(len(database)) > validation_split
-    train = [a for a, x in zip(database, train_split) if x]
-    valid = [a for a, x in zip(database, train_split) if not x]
+            valid_file = Path(td) / 'valid_data.db'
+            valid_db = ase_to_spkdata(train_data, valid_file)
+            valid_loader = AtomsLoader(valid_db, batch_size=batch_size, num_workers=8, pin_memory=device != "cpu")
 
-    # Start the training process
-    with TemporaryDirectory(prefix='spk') as td:
-        # Save the data to an ASE Atoms database
-        train_file = Path(td) / 'train_data.db'
-        train_db = ase_to_spkdata(train, train_file)
-        train_loader = AtomsLoader(train_db, batch_size=batch_size, shuffle=True, num_workers=8,
-                                   pin_memory=device != "cpu")
+            # Make the trainer
+            opt = optim.Adam(model_msg.parameters(), lr=learning_rate)
 
-        valid_file = Path(td) / 'valid_data.db'
-        valid_db = ase_to_spkdata(valid, valid_file)
-        valid_loader = AtomsLoader(valid_db, batch_size=batch_size, num_workers=8, pin_memory=device != "cpu")
+            # tradeoff
+            rho_tradeoff = 0.9
 
-        # Make the trainer
-        opt = optim.Adam(model.parameters(), lr=learning_rate)
+            # loss function
+            if huber_deltas is None:
+                # Use mean-squared loss
+                def loss(batch, result):
+                    # compute the mean squared error on the energies
+                    diff_energy = batch['energy'] - result['energy']
+                    err_sq_energy = torch.mean(diff_energy ** 2)
 
-        # tradeoff
-        rho_tradeoff = 0.9
+                    # compute the mean squared error on the forces
+                    diff_forces = batch['forces'] - result['forces']
+                    err_sq_forces = torch.mean(diff_forces ** 2)
 
-        # loss function
-        if huber_deltas is None:
-            # Use mean-squared loss
-            def loss(batch, result):
-                # compute the mean squared error on the energies
-                diff_energy = batch['energy'] - result['energy']
-                err_sq_energy = torch.mean(diff_energy ** 2)
+                    # build the combined loss function
+                    err_sq = rho_tradeoff * err_sq_energy + (1 - rho_tradeoff) * err_sq_forces
 
-                # compute the mean squared error on the forces
-                diff_forces = batch['forces'] - result['forces']
-                err_sq_forces = torch.mean(diff_forces ** 2)
+                    return err_sq
+            else:
+                # Use huber loss
+                delta_energy, delta_force = huber_deltas
 
-                # build the combined loss function
-                err_sq = rho_tradeoff * err_sq_energy + (1 - rho_tradeoff) * err_sq_forces
+                def loss(batch: Dict[str, torch.Tensor], result):
+                    # compute the mean squared error on the energies per atom
+                    n_atoms = batch['_atom_mask'].sum(axis=1)
+                    err_sq_energy = torch.nn.functional.huber_loss(batch['energy'] / n_atoms,
+                                                                   result['energy'].float() / n_atoms,
+                                                                   delta=delta_energy)
 
-                return err_sq
-        else:
-            # Use huber loss
-            delta_energy, delta_force = huber_deltas
+                    # compute the mean squared error on the forces
+                    err_sq_forces = torch.nn.functional.huber_loss(batch['forces'], result['forces'], delta=delta_force)
 
-            def loss(batch: Dict[str, torch.Tensor], result):
-                # compute the mean squared error on the energies per atom
-                n_atoms = batch['_atom_mask'].sum(axis=1)
-                err_sq_energy = torch.nn.functional.huber_loss(batch['energy'] / n_atoms,
-                                                               result['energy'].float() / n_atoms,
-                                                               delta=delta_energy)
+                    # build the combined loss function
+                    err_sq = rho_tradeoff * err_sq_energy + (1 - rho_tradeoff) * err_sq_forces
 
-                # compute the mean squared error on the forces
-                err_sq_forces = torch.nn.functional.huber_loss(batch['forces'], result['forces'], delta=delta_force)
+                    return err_sq
 
-                # build the combined loss function
-                err_sq = rho_tradeoff * err_sq_energy + (1 - rho_tradeoff) * err_sq_forces
+            metrics = [
+                spk.metrics.MeanAbsoluteError('energy'),
+                spk.metrics.MeanAbsoluteError('forces')
+            ]
 
-                return err_sq
+            if patience is None:
+                patience = num_epochs // 8
+            hooks = [
+                trn.CSVHook(log_path=td, metrics=metrics),
+                trn.ReduceLROnPlateauHook(
+                    opt,
+                    patience=patience, factor=0.8, min_lr=1e-6,
+                    stop_after_min=True
+                )
+            ]
 
-        metrics = [
-            spk.metrics.MeanAbsoluteError('energy'),
-            spk.metrics.MeanAbsoluteError('forces')
-        ]
+            if self.timeout is not None:
+                hooks.append(TimeoutHook(self.timeout))
 
-        if patience is None:
-            patience = num_epochs // 8
-        hooks = [
-            trn.CSVHook(log_path=td, metrics=metrics),
-            trn.ReduceLROnPlateauHook(
-                opt,
-                patience=patience, factor=0.8, min_lr=1e-6,
-                stop_after_min=True
+            trainer = trn.Trainer(
+                model_path=td,
+                model=model_msg,
+                hooks=hooks,
+                loss_fn=loss,
+                optimizer=opt,
+                train_loader=train_loader,
+                validation_loader=valid_loader,
+                checkpoint_interval=num_epochs + 1  # Turns off checkpointing
             )
-        ]
 
-        if timeout is not None:
-            hooks.append(TimeoutHook(timeout))
+            trainer.train(device, n_epochs=num_epochs)
 
-        trainer = trn.Trainer(
-            model_path=td,
-            model=model,
-            hooks=hooks,
-            loss_fn=loss,
-            optimizer=opt,
-            train_loader=train_loader,
-            validation_loader=valid_loader,
-            checkpoint_interval=num_epochs + 1  # Turns off checkpointing
-        )
+            # Load in the best model
+            model_msg = torch.load(os.path.join(td, 'best_model'), map_location='cpu')
 
-        trainer.train(device, n_epochs=num_epochs)
+            # Load in the training results
+            train_results = pd.read_csv(os.path.join(td, 'log.csv'))
 
-        # Load in the best model
-        model = torch.load(os.path.join(td, 'best_model'), map_location='cpu')
-
-        # Load in the training results
-        train_results = pd.read_csv(os.path.join(td, 'log.csv'))
-
-        return TorchMessage(model), train_results
+            return TorchMessage(model_msg), train_results
