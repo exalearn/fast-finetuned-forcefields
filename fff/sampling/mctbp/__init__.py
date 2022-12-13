@@ -12,80 +12,109 @@ import ase
 import numpy as np
 import math
 
-import fff.simulation.water_cluster_moves as mcm
+import fff.sampling.mctbp.water_cluster_moves as mcm
+from fff.sampling.base import CalculatorBasedSampler
 
 logger = logging.getLogger(__name__)
 
 
-def run_mctbp(atoms: ase.Atoms, calc: Calculator, steps, fmax=0.005, min_tol=1.2, max_disp=1, temp=0.8, use_eff_temp=True, use_dsi=True):
-    """Run a MC-TBP simulation
+class MCTBP(CalculatorBasedSampler):
+    """The Monte Carlo Thermal Basin Paving technique
 
-    Args:
-        atoms: Starting water cluster geometry
-        calc: Calculator used for computing energy and forces
-        steps: number of MC moves to make
-        fmax: Convergence criterion for optimization steps
-        min_tol: minimum distance between atoms after MC move to make it an "acceptable" structure
-        max_disp: Maximum displacement during monte carlo move
-        temp: Monte carlo temperature
-        use_eff_temp: Whether to adjust the temperature during
-        use_dsi: Use dissimilarity index to judge structures
-    Returns:
-        - Last structure during sampling run
-        - Every structure sampled along the way
+    Returns both the last structure sampled and any produced optimization
     """
 
-    eff_temp = None
+    def __init__(self,
+                fmax: float = 0.005,
+                min_tol: float = 1.2,
+                max_disp: float = 1.,
+                temp: float = 0.8,
+                use_eff_temp: bool = True,
+                use_dsi: bool = True,
+                scratch_dir: Path | None = None):
+        """
 
-    # Initialize tracking arrays
-    all_sampled = []  # all structures that were sampled
-    energy_list = []  # energies that were sampled
+        Args:
+            fmax: Convergence criterion for optimization steps
+            min_tol: minimum distance between atoms after MC move to make it an "acceptable" structure
+            max_disp: Maximum displacement during monte carlo move
+            temp: Monte carlo temperature
+            use_eff_temp: Whether to adjust the temperature during
+            use_dsi: Use dissimilarity index to judge structures
+            scratch_dir: Location in which to store temporary files
+        """
+        super().__init__(scratch_dir=scratch_dir)
+        self.fmax = fmax
+        self.min_tol = min_tol
+        self.max_disp = max_disp
+        self.temp = temp
+        self.use_eff_temp = use_eff_temp
+        self.use_dsi = use_dsi
 
-    # Start by optimizing the structure
-    opt_cluster, sampled_structures = optimize_structure(atoms, calc, fmax=fmax)
-    all_sampled.extend(sampled_structures)
-    energy_list.append(opt_cluster.get_potential_energy())  # Pulls a cached result
-    curr_e = opt_cluster.get_potential_energy()
+    def _run_sampling(self, atoms: ase.Atoms, steps: int, calc: Calculator, **kwargs) -> (ase.Atoms, list[ase.Atoms]):
+        """Run an MC-TBP simulation
 
-    # Loop over a set number of optimization steps
-    new_cluster = opt_cluster.copy()
-    for i in range(steps):
-        accept = False
-        for _ in range(100000):
-            mc_cluster, move_type = get_move(new_cluster.get_positions(), max_disp, len(atoms) // 3)
-            accept = check_atom_overlap(mc_cluster, min_tol=min_tol)
-            if accept:
-                break
-        new_cluster.set_positions(mc_cluster)
-        assert accept, 'Did not find an acceptable move'
+        Args:
+            atoms: Starting water cluster geometry
+            calc: Calculator used for computing energy and forces
+            steps: number of MC moves to make
+        Returns:
+            - Last structure during sampling run
+            - Every structure sampled along the way
+        """
 
-        # Find the nearest local minimum
-        opt_new_cluster, sampled_structures = optimize_structure(atoms, calc, fmax=fmax)
+        eff_temp = None
+
+        # Initialize tracking arrays
+        all_sampled = []  # all structures that were sampled
+        energy_list = []  # energies that were sampled
+
+        # Start by optimizing the structure
+        opt_cluster, sampled_structures = optimize_structure(atoms, calc, self.scratch_dir, fmax=self.fmax)
         all_sampled.extend(sampled_structures)
-        new_e = opt_new_cluster.get_potential_energy()
+        energy_list.append(opt_cluster.get_potential_energy())  # Pulls a cached result
+        curr_e = opt_cluster.get_potential_energy()
 
-        # Determine whether to accept the move
-        if use_eff_temp:
-            accept_move = move_acceptance(curr_e, new_e,
-                                          new_cluster.get_positions(), opt_new_cluster.get_positions(),
-                                          temp if eff_temp is None else eff_temp,
-                                          use_dsi=use_dsi)
-            bin_count = get_histogram_count(energy_list)
-            eff_temp = calc_eff_temp(temp, bin_count)
-        else:
-            accept_move = move_acceptance(curr_e, new_e, temp)
+        # Loop over a set number of optimization steps
+        new_cluster = opt_cluster.copy()
+        for i in range(steps):
+            accept = False
+            for _ in range(100000):
+                mc_cluster, move_type = get_move(new_cluster.get_positions(), self.max_disp, len(atoms) // 3)
+                accept = check_atom_overlap(mc_cluster, min_tol=self.min_tol)
+                if accept:
+                    break
+            new_cluster.set_positions(mc_cluster)
+            assert accept, 'Did not find an acceptable move'
 
-        if accept_move:
-            accept_structure = check_optimized_structure(opt_new_cluster.get_positions())
-            if accept_structure:
-                energy_list.append(new_e)
-                new_cluster = opt_new_cluster
-                curr_e = new_e
+            # Find the nearest local minimum
+            opt_new_cluster, sampled_structures = optimize_structure(atoms, calc, self.scratch_dir, fmax=self.fmax)
+            all_sampled.extend(sampled_structures)
+            new_e = opt_new_cluster.get_potential_energy()
 
-    return new_cluster, sampled_structures
+            # Determine whether to accept the move
+            if self.use_eff_temp:
+                accept_move = move_acceptance(curr_e, new_e,
+                                              new_cluster.get_positions(), opt_new_cluster.get_positions(),
+                                              self.temp if eff_temp is None else eff_temp,
+                                              use_dsi=self.use_dsi)
+                bin_count = get_histogram_count(energy_list)
+                eff_temp = calc_eff_temp(self.temp, bin_count)
+            else:
+                accept_move = move_acceptance(curr_e, new_e, self.temp)
+
+            if accept_move:
+                accept_structure = check_optimized_structure(opt_new_cluster.get_positions())
+                if accept_structure:
+                    energy_list.append(new_e)
+                    new_cluster = opt_new_cluster
+                    curr_e = new_e
+
+        return new_cluster, sampled_structures
 
 
-def optimize_structure(atoms: ase.Atoms, calc: Calculator, fmax: float = 1e-3, max_steps: int = 100, mult: float = 5) -> (ase.Atoms, list[ase.Atoms]):
+def optimize_structure(atoms: ase.Atoms, calc: Calculator, scratch_dir: Path | None = None,
+                       fmax: float = 1e-3, max_steps: int = 100, mult: float = 5) -> (ase.Atoms, list[ase.Atoms]):
     """Optimize new structure
 
     Args:
@@ -100,7 +129,7 @@ def optimize_structure(atoms: ase.Atoms, calc: Calculator, fmax: float = 1e-3, m
     """
 
     # Run everything inside a temporary directory
-    with TemporaryDirectory(prefix='mctbp') as tmp:
+    with TemporaryDirectory(dir=scratch_dir, prefix='mctbp') as tmp:
         tmp = Path(tmp)
 
         # Store the trajectory

@@ -7,7 +7,7 @@ import numpy as np
 from pytest import fixture
 
 from fff.learning.spk import ase_to_spkdata, train_schnet, evaluate_schnet, SPKCalculatorMessage
-from fff.simulation.md import run_dynamics
+from fff.sampling.md import MolecularDynamics
 
 
 @fixture
@@ -60,13 +60,13 @@ def test_ase(schnet):
     assert h2o.get_forces().shape == (3, 3)
 
     # Test running the dynamics
-    traj = run_dynamics(h2o, calc, 0.1, 100)
+    traj = MolecularDynamics().run_sampling(h2o, 100, calc, timestep=0.1)
     assert len(traj) > 0
 
     # Test sending it as a message
     msg = SPKCalculatorMessage(schnet)
-    msg = pkl.loads(pkl.dumps(msg))
-    traj = run_dynamics(h2o, msg, 0.1, 100)
+    calc = pkl.loads(pkl.dumps(msg))
+    traj = MolecularDynamics().run_sampling(h2o, 100, calc, timestep=0.1)
     assert len(traj) > 0
 
 
