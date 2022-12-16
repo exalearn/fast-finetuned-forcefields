@@ -8,10 +8,9 @@ import logging
 from ase.calculators.calculator import Calculator
 from ase.md import VelocityVerlet
 from ase.io import Trajectory
-from ase import Atoms, units
+from ase import units
 import ase
 
-from fff.learning.spk import SPKCalculatorMessage
 from .base import CalculatorBasedSampler
 
 logger = logging.getLogger(__name__)

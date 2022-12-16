@@ -42,6 +42,11 @@ class SchnetCalculator(Calculator):
         state['net'] = torch.load(fp, map_location='cpu')
         self.__dict__ = state
 
+    def to(self, device: str):
+        """Move the model to a certain device"""
+        self.net.to(device)
+        self.device = device
+
     def calculate(
             self, atoms=None, properties=None, system_changes=all_changes,
     ):

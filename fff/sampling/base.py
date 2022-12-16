@@ -5,7 +5,8 @@ from pathlib import Path
 import ase
 from ase.calculators.calculator import Calculator
 
-from fff.learning.spk import SPKCalculatorMessage
+from fff.learning.gc.ase import SchnetCalculator
+from fff.learning.spk import SpkCalculator
 
 
 class BaseSampler:
@@ -37,7 +38,7 @@ class BaseSampler:
 class CalculatorBasedSampler(BaseSampler):
     """A sampler class which uses an ase :class:`~ase.calculators.calculator.Calculator` to generate energies"""
 
-    def run_sampling(self, atoms: ase.Atoms, steps: int, calc: Calculator | SPKCalculatorMessage = None,
+    def run_sampling(self, atoms: ase.Atoms, steps: int, calc: Calculator = None,
                      device: str | None = None, **kwargs) -> (ase.Atoms, list[ase.Atoms]):
         """Run a sampling method
 
@@ -54,8 +55,8 @@ class CalculatorBasedSampler(BaseSampler):
         assert calc is not None, 'You must specify a calculator'
 
         # Unpack the calculator depending on its class
-        if isinstance(calc, SPKCalculatorMessage):
-            calc = calc.load(device)
+        if isinstance(calc, (SpkCalculator, SchnetCalculator)):
+            calc.to(device)
 
         return self._run_sampling(atoms, steps, calc, **kwargs)
 

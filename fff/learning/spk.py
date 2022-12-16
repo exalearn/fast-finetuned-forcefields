@@ -9,6 +9,7 @@ import os
 from schnetpack.data import AtomsData, AtomsLoader
 from schnetpack import train as trn
 import schnetpack as spk
+from six import BytesIO
 from torch import optim
 import pandas as pd
 import numpy as np
@@ -19,38 +20,29 @@ from fff.learning.util.messages import TorchMessage
 from .base import BaseLearnableForcefield, ModelMsgType
 
 
-class SPKCalculatorMessage:
-    """Tool for sending a SPK calculator to a remote system"""
-
-    def __init__(self, model: torch.nn.Module):
-        """
-        Args:
-            model: Model to be sent
-        """
-        self._model = pkl.dumps(TorchMessage(model))
-        self.model = None  # Only loaded when deserialized
+class SpkCalculator(spk.interfaces.SpkCalculator):
+    """Subclass of the SchNetPack calculator that is better for distributed computing"""
 
     def __getstate__(self):
+        # Remove the model from the serialization dictionary
         state = self.__dict__.copy()
-        state['model'] = None  # The model never gets sent unserialized
+        net = state.pop('model')
+
+        # Serialize it using Torch's "save" functionality
+        fp = BytesIO()
+        torch.save(net, fp)
+        state['_net'] = fp.getvalue()
         return state
 
-    def load(self, device: str) -> spk.interfaces.SpkCalculator:
-        """Unload a copy of the calculator
+    def __setstate__(self, state):
+        # Load it back in
+        fp = BytesIO(state.pop('_net'))
+        state['model'] = torch.load(fp, map_location='cpu')
+        self.__dict__ = state
 
-        Args:
-            device: Device on which to load the calculator
-        """
-        # Load it in if we are not done already
-        if self.model is None:
-            self.model = pkl.loads(self._model)
-            self._model = None
-
-        # Return the object
-        return spk.interfaces.SpkCalculator(
-            self.model.get_model(device),
-            energy='energy', forces='forces'
-        )
+    def to(self, device: str):
+        """Move to model to a specific device"""
+        self.model.to(device)
 
 
 def ase_to_spkdata(atoms: List[ase.Atoms], path: Path) -> AtomsData:
