@@ -91,6 +91,7 @@ class MCTBP(CalculatorBasedSampler):
             opt_new_cluster, sampled_structures = optimize_structure(atoms, calc, self.scratch_dir, fmax=self.fmax)
             all_sampled.extend(sampled_structures)
             new_e = opt_new_cluster.get_potential_energy()
+            energy_list.append(new_e)
 
             # Determine whether to accept the move
             if self.use_eff_temp:
@@ -106,7 +107,6 @@ class MCTBP(CalculatorBasedSampler):
             if accept_move:
                 accept_structure = check_optimized_structure(opt_new_cluster.get_positions())
                 if accept_structure:
-                    energy_list.append(new_e)
                     new_cluster = opt_new_cluster
                     curr_e = new_e
 
