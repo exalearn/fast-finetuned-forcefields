@@ -7,6 +7,10 @@ on: [push]
 
 permissions:
   contents: read
+  
+defaults:
+  run:
+    shell: bash -el {0}  # Lets conda work
 
 jobs:
   build:
@@ -22,7 +26,6 @@ jobs:
         environment-file: envs/environment-cpu.yml
     - name: Install test dependencies
       run: |
-        conda activate test
         pip install -r test-requirements.txt
     - name: Build TTM
       run: |
