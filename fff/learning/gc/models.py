@@ -21,7 +21,6 @@ def load_pretrained_model(
         clip_value: Optional[float] = None,
         load_state: bool = True,
         device: str = 'cpu',
-        frozen: bool = False
 ) -> 'SchNet':
     """Load single SchNet model
 
@@ -32,12 +31,11 @@ def load_pretrained_model(
         clip_value: Gradient clipping threshold
         load_state: Whether to load previous weights from
         device: Device on which to load the model
-        frozen: Whether to hold weights in layers constant during training
     """
     device = torch.device(device)
 
     # load state dict of trained model
-    state = torch.load(path)
+    state = torch.load(path, map_location=device)
 
     # remove module. from statedict keys (artifact of parallel gpu training)
     state = {k.replace('module.', ''): v for k, v in state.items()}
@@ -59,8 +57,6 @@ def load_pretrained_model(
         # load trained weights into model
         net.load_state_dict(state)
         logger.info('model weights loaded')
-
-    net.to(device)
 
     # register backward hook --> gradient clipping
     if clip_value is not None:
