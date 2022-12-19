@@ -1,5 +1,4 @@
 """Collections of Python functions for generating new training data"""
-import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 from tempfile import TemporaryDirectory
 from typing import Optional
@@ -52,6 +51,6 @@ def _run_calculator(xyz: str, calc: Calculator | dict, temp_path: Optional[str] 
             atoms.get_potential_energy()
         except BaseException as exc:
             raise ValueError(f'Calculation failed: {exc}')
-        
+
         # Convert it to JSON
         return write_to_string(atoms, 'json')

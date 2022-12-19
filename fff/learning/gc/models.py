@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -95,7 +95,7 @@ class SchNet(nn.Module):
             collect for each node within the :attr:`cutoff` distance.
             (default: 28)
         :param neighbor_method (str): Method to collect neighbors for each node.
-            'knn' uses knn_graph; 'radius' uses radius_graph. 
+            'knn' uses knn_graph; 'radius' uses radius_graph.
             (default: 'knn')
         :param batch_size (int, optional): The number of molecules in the batch.
             This can be inferred from the batch input when not supplied.
@@ -242,4 +242,4 @@ class SchNet(nn.Module):
         loss = F.mse_loss(input, target, reduction="sum")
         N = (target != 0.0).to(loss.dtype).sum()
         loss = loss / N
-        return identity_loss(loss, reduction="none")
+        return loss

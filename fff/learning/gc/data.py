@@ -94,7 +94,6 @@ class AtomsDataset(InMemoryDataset):
                 # Loop over all records
                 for row in conn.select(''):
                     # Extract the data from the ASE records
-                    name = ['energy', 'forces']
                     mol: Atoms = row.toatoms()
                     data = convert_atoms_to_pyg(mol)
 

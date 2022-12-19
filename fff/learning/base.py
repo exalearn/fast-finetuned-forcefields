@@ -8,7 +8,6 @@ import torch.nn
 
 from .util.messages import TorchMessage
 
-
 # TODO (wardlt): Break the hard-wire to PyTorch
 
 ModelMsgType = TorchMessage | torch.nn.Module | Path
@@ -93,4 +92,3 @@ class BaseLearnableForcefield:
             - history: Training history
         """
         ...
-

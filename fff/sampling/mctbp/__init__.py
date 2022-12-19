@@ -166,7 +166,7 @@ def optimize_structure(atoms: ase.Atoms, calc: Calculator, scratch_dir: Path | N
             for attempt in range(5):
                 try:
                     dyn.run(fmax=fmax * (mult ** attempt), steps=max_steps)
-                except Exception as exc:
+                except Exception:
                     continue  # Proceeds to a looser convergence criterion
                 break
 
@@ -281,7 +281,7 @@ def move_acceptance(prev_e, curr_e, prev_struct=None, curr_struct=None, temp=0.8
     if curr_e <= prev_e:
         accept = True
     else:
-        if use_dsi == True:
+        if use_dsi:
             dsi = get_dsi(prev_struct, curr_struct)
             if dsi <= dsi_threshold:
                 accept = False

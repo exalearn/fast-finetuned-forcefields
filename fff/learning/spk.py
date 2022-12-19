@@ -1,9 +1,8 @@
 """Utilities for using models based on SchNet"""
 from tempfile import TemporaryDirectory
-from typing import Union, List, Tuple, Optional, Dict
+from typing import List, Dict
 from time import monotonic
 from pathlib import Path
-import pickle as pkl
 import os
 
 from schnetpack.data import AtomsData, AtomsLoader

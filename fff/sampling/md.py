@@ -1,7 +1,6 @@
 """Sampling structures using molecular dynamics"""
 import os
 from tempfile import TemporaryDirectory
-from typing import Optional, List, Union
 from pathlib import Path
 import logging
 
