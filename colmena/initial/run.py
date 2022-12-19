@@ -3,9 +3,9 @@ from threading import Event, Lock
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
-from random import shuffle
+from random import shuffle, sample
 from pathlib import Path
-from typing import Dict, Tuple, Any
+from typing import Dict, Any
 from dataclasses import asdict
 import hashlib
 import logging
@@ -16,24 +16,24 @@ import sys
 
 import ase
 from ase.db import connect
-from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from colmena.models import Result
-from colmena.redis.queue import ClientQueues, make_queue_pairs
+from colmena.queue import PipeQueues, ColmenaQueues
 from colmena.thinker import BaseThinker, event_responder, result_processor, ResourceCounter, task_submitter
 from colmena.task_server.funcx import FuncXTaskServer
 from funcx import FuncXClient
-from torch import nn
 import proxystore as ps
 import numpy as np
 import torch
 
-from fff.learning.spk import TorchMessage, SPKCalculatorMessage, train_schnet, evaluate_schnet
+from fff.learning.gc.ase import SchnetCalculator
+from fff.learning.gc.functions import GCSchNetForcefield
+from fff.learning.gc.models import SchNet, load_pretrained_model
+from fff.learning.util.messages import TorchMessage
+from fff.sampling.mctbp import MCTBP
 from fff.simulation import run_calculator
-from fff.simulation.md import run_dynamics
 from fff.simulation.utils import read_from_string, write_to_string
 
 logger = logging.getLogger('main')
-calc = dict(calc='psi4', method='b3lyp-d3', basis='6-31g', num_threads=64)
 
 
 @dataclass
@@ -80,8 +80,8 @@ class SimulationTask:
     traj_id: int  # Which trajectory this came from
     ml_eng: float  # Energy predicted from machine learning model
     ml_std: float | None = None  # Uncertainty of the model
-    
-    
+
+
 def _get_proxy_stats(obj: Any, result: Result):
     """Update a Result object with the proxy stats of its result
     Should be run after using the result and just before saving the output
@@ -110,11 +110,11 @@ class Thinker(BaseThinker):
 
     def __init__(
             self,
-            queues: ClientQueues,
+            queues: ColmenaQueues,
             out_dir: Path,
             db_path: Path,
             search_path: Path,
-            model: nn.Module,
+            model: SchNet,
             energy_tolerance: float,
             min_run_length: int,
             max_run_length: int,
@@ -192,15 +192,13 @@ class Thinker(BaseThinker):
             self.starting_model_proxy = train_store.proxy(TorchMessage(self.starting_model))
         else:
             self.starting_model_proxy = TorchMessage(self.starting_model)
-                
 
         # Create a proxy for the "active" model that we'll use to generate trajectories
         if 'sample' in self.ps_names:
             sample_store = ps.store.get_store(self.ps_names['sample'])
-            self.active_model_proxy = sample_store.proxy(SPKCalculatorMessage(self.starting_model))
+            self.active_model_proxy = sample_store.proxy(SchnetCalculator(self.starting_model))
         else:
-            self.active_model_proxy = SPKCalculatorMessage(self.starting_model)
-                
+            self.active_model_proxy = SchnetCalculator(self.starting_model)
 
         # Proxies for the inference models
         self.inference_proxies: list[ps.proxy.Proxy | None] = [None] * self.n_models  # None until first trained
@@ -242,19 +240,27 @@ class Thinker(BaseThinker):
         self.logger.info(f'Loaded {len(all_examples)} training examples')
 
         # Sample the training sets and proxy them
-        subsets = [np.random.choice(all_examples, size=len(all_examples), replace=True) for i in range(self.n_models)]
+        train_sets = []
+        valid_sets = []
+        n_train = int(len(all_examples) * 0.9)
+        for _ in range(self.n_models):
+            np.random.shuffle(all_examples)
+            train_sets.append(all_examples[:n_train])
+            valid_sets.append(all_examples[n_train:])
+
         if 'train' in self.ps_names:
             store = ps.store.get_store(self.ps_names['train'])  # TODO (wardlt): Store stores not names?
-            subset_proxies = store.proxy_batch(subsets)
-        else:
-            subset_proxies = subsets
+            train_sets = store.proxy_batch(train_sets)
+            valid_sets = store.proxy_batch(valid_sets)
 
         # Send off the models to be trained
-        for i, subset in enumerate(subset_proxies):
+        for i, train_set in enumerate(train_sets):
             # Send a training job
             self.queues.send_inputs(
-                self.starting_model_proxy, subset,
-                method='train_schnet',
+                self.starting_model_proxy,
+                train_set,
+                valid_sets[i],
+                method='train',
                 topic='train',
                 task_info={'model_id': i, 'training_round': self.training_round},
             )
@@ -292,10 +298,10 @@ class Thinker(BaseThinker):
                 if 'sample' in self.ps_names:
                     sample_store = ps.store.get_store(self.ps_names['sample'])
                     sample_store.evict(ps.proxy.get_key(self.active_model_proxy))
-                    self.active_model_proxy = sample_store.proxy(SPKCalculatorMessage(model_msg.get_model()))
+                    self.active_model_proxy = sample_store.proxy(SchnetCalculator(model_msg.get_model()))
                 else:
-                    self.active_model_proxy = SPKCalculatorMessage(model_msg.get_model())
-                        
+                    self.active_model_proxy = SchnetCalculator(model_msg.get_model())
+
                 self.active_updated = True
                 self.logger.info('Updated the active model')
 
@@ -331,11 +337,14 @@ class Thinker(BaseThinker):
             self.training_complete.set()
         else:
             self.logger.info(f'{self.training_incomplete} models left to train')
-        
+
         # Save the result to disk
         _get_proxy_stats(proxy, result)
         with open(self.out_dir / 'training-results.json', 'a') as fp:
             print(result.json(exclude={'inputs', 'value'}), file=fp)
+
+        # Stop if the model training failed
+        assert result.success, result.failure_info.exception
 
         self.logger.info('TIMING - End store_models')
 
@@ -361,21 +370,14 @@ class Thinker(BaseThinker):
             self.logger.info(f'Estimated run length of {estimated_run_length} steps to have an error of {target_error:.3f} eV/atom')
             self.run_length = max(self.min_run_length, min(self.max_run_length, estimated_run_length))  # Keep to within the user-defined bounds
 
-        # Give it some velocity if there is not
-        if starting_point.get_velocities().max() < 1e-6:
-            self.logger.info(f'Starting from the first step. Initializing temperature')
-            MaxwellBoltzmannDistribution(starting_point, temperature_K=100)
-
         # Submit it with the latest model
         self.logger.info(f'Running trajectory {trajectory.id} for {self.run_length} steps '
                          f'starting at {trajectory.current_timestep}')
         self.queues.send_inputs(
-            starting_point, self.active_model_proxy,
-            input_kwargs={
-                'steps': self.run_length,
-                'log_interval': max(1, self.run_length // self.samples_per_run)
-            },
-            method='run_dynamics',
+            starting_point,
+            self.run_length,
+            self.active_model_proxy,
+            method='run_sampling',
             topic='sample',
             task_info={'traj_id': trajectory.id, 'run_length': self.run_length}
         )
@@ -405,14 +407,19 @@ class Thinker(BaseThinker):
         # If successful, submit the structures for auditing
         proxy = result.value
         if result.success:
-            traj = result.value
+            audit, traj = result.value
             self.logger.info(f'Produced {len(traj)} new structures')
 
+            # Down-sample to target count if needed
+            if len(traj) > self.samples_per_run:
+                traj = sample(traj, self.samples_per_run)
+                self.logger.info(f'Downsampled to {len(traj)}')
+
             # Save how many were produced
-            result.task_info['num_produced'] = len(traj) - 1  # First was the initial structure
+            result.task_info['num_produced'] = len(traj)  # First was the initial structure
 
             # Update the state of the trajectory
-            self.to_audit[traj_id].update_current_structure(traj[-1], result.task_info['run_length'])
+            self.to_audit[traj_id].update_current_structure(audit, result.task_info['run_length'])
 
             # Add the latest one to the audit list
             with self.task_queue_lock:
@@ -420,13 +427,14 @@ class Thinker(BaseThinker):
                     atoms=traj[-1], traj_id=traj_id, ml_eng=traj[-1].get_potential_energy()
                 ))
                 self.has_tasks.set()
-                
+                self._log_queue_sizes()
+
             # Store the trajectory ID as information about the atoms object
             for a in traj:
                 a.info['traj_id'] = traj_id
 
             # Extend the current list of candidates
-            self.inference_pool.extend(traj[1:-1])
+            self.inference_pool.extend(traj)
             self.logger.info(f'Inference pool now has {len(self.inference_pool)} candidates')
 
             # Submit if we are not training
@@ -451,7 +459,7 @@ class Thinker(BaseThinker):
         """
         if self.done.is_set():
             return
-            
+
         # Submit inference chunks if possible
         while len(self.inference_pool) > self.infer_chunk_size and self.inference_ready.is_set():
             # Split off a chunk
@@ -473,7 +481,7 @@ class Thinker(BaseThinker):
             # Submit inference for each model
             for model_id, model_msg in enumerate(self.inference_proxies):
                 self.queues.send_inputs(
-                    model_msg, inf_proxy, method='evaluate_schnet', topic='infer',
+                    model_msg, inf_proxy, method='evaluate', topic='infer',
                     task_info={'model_id': model_id, 'infer_id': self.inference_round}
                 )
 
@@ -545,7 +553,7 @@ class Thinker(BaseThinker):
                 self.task_queue_active.extend(selected_structures)
             self.logger.info('Updated task queue')
             self._log_queue_sizes()
-            
+
         # Store the results to disk
         _get_proxy_stats(proxy, result)
         with open(self.out_dir / 'inference-results.json', 'a') as fp:
@@ -574,6 +582,8 @@ class Thinker(BaseThinker):
         # Make the structures and traj_ids a ndarray so we can slice it easier
         structures = np.array(structures, dtype=object)
         traj_ids = np.array(traj_ids)
+
+        # TODO (wardlt): Screen out molecules too similar to training set
 
         # Gradually add a list of molecules
         output = []
@@ -657,13 +667,13 @@ class Thinker(BaseThinker):
     def store_simulation(self, result: Result):
         """Store the results from a simulation"""
         self.logger.info('TIMING - Start store_simulation')
-        
+
         # Get the associated trajectory
         traj_id = result.task_info['traj_id']
         self.logger.info(f'Received a simulation from trajectory {traj_id}. Success: {result.success}')
 
         # Reallocate resources if the task queue is getting too small
-        if len(self.task_queue_audit) < self.n_qc_workers and \
+        if len(self.task_queue_audit) <= self.n_qc_workers and \
                 self.rec.allocated_slots('simulate') > 0 and \
                 not self.reallocating.is_set():
             self.reallocating.set()
@@ -709,8 +719,11 @@ class Thinker(BaseThinker):
                 self.logger.info(f'Difference between ML and DFT: {difference:.3f} eV/atom')
 
             # Store in the training set
-            with connect(self.db_path) as db:
-                db.write(atoms, runtime=result.time_running)
+            if difference < 1e6:
+                with connect(self.db_path) as db:
+                    db.write(atoms, runtime=result.time_running)
+            else:
+                self.logger.info('Difference is too large. Not storing as this structure is unrealistic')
 
             # Trigger actions based on number of tasks completed
             if self.num_complete % self.retrain_freq == 0:
@@ -751,6 +764,7 @@ if __name__ == '__main__':
     group.add_argument("--qc-endpoint", help='FuncX endpoint ID for quantum chemistry')
     group.add_argument("--num-qc-workers", type=int, help="Number of workers performing chemistry tasks")
     group.add_argument("--parsl", action='store_true', help='Use Parsl instead of FuncX')
+    group.add_argument("--parsl-site", choices=['theta-lambda', 'local'], required=True, help='Which configuration to use for Parsl')
 
     # Problem configuration
     group = parser.add_argument_group(title='Problem Definition',
@@ -760,6 +774,7 @@ if __name__ == '__main__':
     group.add_argument('--search-space', help='Path to ASE DB of starting structures for molecular dynamics sampling',
                        required=True)
     group.add_argument('--num-to-run', default=100, type=int, help='Total number of simulations to perform')
+    group.add_argument('--calculator', choices=['ttm', 'dft'], required=True, help='Method used to create training data.')
 
     # Parameters related to training the models
     group = parser.add_argument_group(title="Training Settings")
@@ -774,9 +789,9 @@ if __name__ == '__main__':
     group = parser.add_argument_group(title="Sampling Settings")
     #  TODO (wardlt): Switch to using a different endpoint for simulation and sampling tasks?
     group.add_argument("--num-samplers", type=int, default=1, help="Number of agents to use to sample structures")
-    group.add_argument("--min-run-length", type=int, default=100,
+    group.add_argument("--min-run-length", type=int, default=1,
                        help="Minimum timesteps to run sampling calculations.")
-    group.add_argument("--max-run-length", type=int, default=5000,
+    group.add_argument("--max-run-length", type=int, default=100,
                        help="Maximum timesteps to run sampling calculations.")
     group.add_argument("--num-frames", type=int, default=50, help="Number of frames to return per sampling run")
     group.add_argument("--energy-tolerance", type=float, default=0.1,
@@ -802,8 +817,7 @@ if __name__ == '__main__':
                        help='Min size in bytes for transferring objects via ProxyStore')
     group.add_argument('--ps-globus-config', default=None,
                        help='Globus Endpoint config file to use with the ProxyStore Globus backend')
-    group.add_argument('--no-proxies', action='store_true', 
-                       help='Skip making any proxies.')
+    group.add_argument('--no-proxies', action='store_true', help='Skip making any proxies.')
 
     # Parse the arguments
     args = parser.parse_args()
@@ -820,10 +834,20 @@ if __name__ == '__main__':
     with open(args.starting_model, 'rb') as fp:
         run_params['model_hash'] = hashlib.sha256(fp.read()).hexdigest()
 
+    # Make the calculator
+    if args.calculator == 'dft':
+        calc = dict(calc='psi4', method='pbe0-d3', basis='aug-cc-pvdz', num_threads=12)
+    elif args.calculator == 'ttm':
+        from ttm.ase import TTMCalculator
+
+        calc = TTMCalculator()
+    else:
+        raise ValueError(f'Calculator not yet supported: {args.calculator}')
+
     # Prepare the output directory and logger
     start_time = datetime.utcnow()
     params_hash = hashlib.sha256(json.dumps(run_params).encode()).hexdigest()[:6]
-    out_dir = Path('runs') / f'{start_time.strftime("%y%b%d-%H%M%S")}-{params_hash}'
+    out_dir = Path('runs') / f'{args.calculator}-{start_time.strftime("%y%b%d-%H%M%S")}-{params_hash}'
     out_dir.mkdir(parents=True)
 
     # Make a copy of the training data
@@ -864,8 +888,7 @@ if __name__ == '__main__':
     ps_backends = {args.simulate_ps_backend, args.sample_ps_backend, args.train_ps_backend}
     logger.info(f'Initializing ProxyStore backends: {ps_backends}')
     if 'redis' in ps_backends:
-        ps.store.init_store(ps.store.STORES.REDIS, name='redis', hostname=args.redishost, port=args.redisport,
-                            stats=True)
+        ps.store.init_store(ps.store.STORES.REDIS, name='redis', hostname=args.redishost, port=args.redisport, stats=True)
     if 'file' in ps_backends:
         ps.store.init_store(ps.store.STORES.FILE, name='file', store_dir=str(ps_file_dir.absolute()), stats=True)
     if 'globus' in ps_backends:
@@ -880,14 +903,12 @@ if __name__ == '__main__':
         logger.info('Not making any proxies')
 
     # Connect to the redis server
-    client_queues, server_queues = make_queue_pairs(args.redishost,
-                                                    name=start_time.strftime("%d%b%y-%H%M%S"),  # Avoid clashes
-                                                    port=args.redisport,
-                                                    topics=['simulate', 'sample', 'train', 'infer'],
-                                                    serialization_method='pickle',
-                                                    keep_inputs=False,
-                                                    proxystore_name=ps_names,
-                                                    proxystore_threshold=args.ps_threshold)
+    queues = PipeQueues(topics=['simulate', 'sample', 'train', 'infer'],
+                        serialization_method='pickle',
+                        keep_inputs=False,
+                        proxystore_name=ps_names,
+                        proxystore_threshold=args.ps_threshold)
+
 
     # Apply wrappers to functions that will be used to fix certain requirements
     def _wrap(func, **kwargs):
@@ -896,36 +917,45 @@ if __name__ == '__main__':
         return out
 
 
-    my_train_schnet = _wrap(train_schnet, num_epochs=args.num_epochs, device='cuda',
+    schnet = GCSchNetForcefield()
+    sampler = MCTBP()
+
+    my_train_schnet = _wrap(schnet.train, num_epochs=args.num_epochs, device='cuda',
                             learning_rate=5e-4, batch_size=64, patience=8, reset_weights=False,
                             huber_deltas=args.huber_deltas)
-    my_eval_schnet = _wrap(evaluate_schnet, device='cuda')
-    my_run_dynamics = _wrap(run_dynamics, timestep=0.1, device='cpu')
+    my_eval_schnet = _wrap(schnet.evaluate, device='cuda')
+    my_run_dynamics = _wrap(sampler.run_sampling, device='cpu')
     my_run_simulation = _wrap(run_calculator, calc=calc, temp_path=str(out_dir.absolute()))
 
     # Create the task server
     if args.parsl:
-        from config import theta_debug_and_lambda
+        import config as parsl_configs
         from colmena.task_server import ParslTaskServer
 
-        # Create the resource configuration
-        config = theta_debug_and_lambda(str(out_dir))
+        if args.parsl_site == "theta-lambda":
+            # Create the resource configuration
+            config = parsl_configs.theta_debug_and_lambda(str(out_dir))
 
-        # Assign tasks to the appropriate executor
-        methods = [(f, {'executors': ['v100']}) for f in [my_train_schnet, my_eval_schnet]]
-        methods.extend([(f, {'executors': ['knl']}) for f in [my_run_simulation, my_run_dynamics]])
+            # Assign tasks to the appropriate executor
+            methods = [(f, {'executors': ['v100']}) for f in [my_train_schnet, my_eval_schnet]]
+            methods.extend([(f, {'executors': ['knl']}) for f in [my_run_simulation, my_run_dynamics]])
+        elif args.parsl_site == "local":
+            config = parsl_configs.local_parsl(str(out_dir))
+            methods = [my_train_schnet, my_eval_schnet, my_run_dynamics, my_run_simulation]
+        else:
+            raise ValueError(f'Site not yet implemented: {args.parsl_site}')
 
         # Create the server
-        doer = ParslTaskServer(methods, server_queues, config)
+        doer = ParslTaskServer(methods, queues, config)
     else:
         fx_client = FuncXClient()  # Authenticate with FuncX
         task_map = dict((f, args.ml_endpoint) for f in [my_train_schnet, my_eval_schnet])
         task_map.update(dict((f, args.qc_endpoint) for f in [my_run_simulation, my_run_dynamics]))
-        doer = FuncXTaskServer(task_map, fx_client, server_queues)
+        doer = FuncXTaskServer(task_map, fx_client, queues)
 
     # Create the thinker
     thinker = Thinker(
-        client_queues,
+        queues,
         out_dir=out_dir,
         db_path=train_path,
         search_path=Path(args.search_space),
@@ -954,7 +984,7 @@ if __name__ == '__main__':
         thinker.join()
         logging.info('Task generator has completed')
     finally:
-        client_queues.send_kill_signal()
+        queues.send_kill_signal()
 
     # Wait for the method server to complete
     doer.join()

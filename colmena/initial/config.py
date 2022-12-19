@@ -59,3 +59,14 @@ which python
     )
         
     return config
+
+
+def local_parsl(log_dir: str) -> Config:
+    """Configuration which runs all tasks on a single worker"""
+
+    return Config(
+        run_dir=log_dir,
+        executors=[HighThroughputExecutor(
+            available_accelerators=1,
+        )]
+    )
