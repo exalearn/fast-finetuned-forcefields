@@ -25,13 +25,14 @@ class MCTBP(CalculatorBasedSampler):
     """
 
     def __init__(self,
-                fmax: float = 0.005,
-                min_tol: float = 1.2,
-                max_disp: float = 1.,
-                temp: float = 0.8,
-                use_eff_temp: bool = True,
-                use_dsi: bool = True,
-                scratch_dir: Path | None = None):
+                 fmax: float = 0.005,
+                 min_tol: float = 1.2,
+                 max_disp: float = 1.,
+                 temp: float = 0.8,
+                 use_eff_temp: bool = True,
+                 use_dsi: bool = True,
+                 return_incomplete: bool = True,
+                 scratch_dir: Path | None = None):
         """
 
         Args:
@@ -41,6 +42,7 @@ class MCTBP(CalculatorBasedSampler):
             temp: Monte carlo temperature
             use_eff_temp: Whether to adjust the temperature during
             use_dsi: Use dissimilarity index to judge structures
+            return_incomplete: Whether to return structures even if part of the sampling procedure fails
             scratch_dir: Location in which to store temporary files
         """
         super().__init__(scratch_dir=scratch_dir)
@@ -49,6 +51,7 @@ class MCTBP(CalculatorBasedSampler):
         self.max_disp = max_disp
         self.temp = temp
         self.use_eff_temp = use_eff_temp
+        self.return_incomplete = return_incomplete
         self.use_dsi = use_dsi
 
     def _run_sampling(self, atoms: ase.Atoms, steps: int, calc: Calculator, **kwargs) -> (ase.Atoms, list[ase.Atoms]):
@@ -59,6 +62,25 @@ class MCTBP(CalculatorBasedSampler):
             calc: Calculator used for computing energy and forces
             steps: number of MC moves to make
         Returns:
+            - Last structure during sampling run
+            - Every structure sampled along the way
+        """
+
+        success, error_msg, last_strc, traj = self.perform_mctbp(atoms, steps, calc, **kwargs)
+        if not (success or self.return_incomplete):
+            raise ValueError(error_msg)
+        return last_strc, traj
+
+    def perform_mctbp(self, atoms: ase.Atoms, steps: int, calc: Calculator, **kwargs) -> (bool, str, ase.Atoms, list[ase.Atoms]):
+        """Run an MC-TBP simulation
+
+        Args:
+            atoms: Starting water cluster geometry
+            calc: Calculator used for computing energy and forces
+            steps: number of MC moves to make
+        Returns:
+            - Whether the run completed successfully
+            - Reason the run did not complete, if
             - Last structure during sampling run
             - Every structure sampled along the way
         """
@@ -85,7 +107,8 @@ class MCTBP(CalculatorBasedSampler):
                 if accept:
                     break
             new_cluster.set_positions(mc_cluster)
-            assert accept, 'Did not find an acceptable move'
+            if not accept:  # TODO (wardlt): Implement a scheme that uses exceptions
+                return False, 'Did not find an acceptable move', new_cluster, all_sampled
 
             # Find the nearest local minimum
             opt_new_cluster, sampled_structures = optimize_structure(atoms, calc, self.scratch_dir, fmax=self.fmax)
@@ -110,7 +133,7 @@ class MCTBP(CalculatorBasedSampler):
                     new_cluster = opt_new_cluster
                     curr_e = new_e
 
-        return new_cluster, sampled_structures
+        return True, None, new_cluster, sampled_structures
 
 
 def optimize_structure(atoms: ase.Atoms, calc: Calculator, scratch_dir: Path | None = None,
