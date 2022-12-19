@@ -20,10 +20,9 @@ jobs:
       with:
         mamba-version: "*"
         environment-file: envs/environment-cpu.yml
-        auto-activate-base: true
-        activate-environment: ""
     - name: Install test dependencies
       run: |
+        conda activate test
         pip install -r test-requirements.txt
     - name: Build TTM
       run: |
