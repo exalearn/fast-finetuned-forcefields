@@ -172,4 +172,4 @@ class GCSchNetForcefield(BaseLearnableForcefield):
                 # Store the log line
                 log.append({'epoch': epoch, 'time': time.perf_counter() - start_time, **train_losses, **valid_losses})
 
-            return model, pd.DataFrame(log)
+            return TorchMessage(model), pd.DataFrame(log)
