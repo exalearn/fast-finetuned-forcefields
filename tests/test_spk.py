@@ -6,7 +6,7 @@ from ase import build
 import numpy as np
 from pytest import fixture
 
-from fff.learning.spk import ase_to_spkdata, SchnetPackForcefield, SPKCalculatorMessage
+from fff.learning.spk import ase_to_spkdata, SchnetPackForcefield, SpkCalculator
 from fff.sampling.md import MolecularDynamics
 
 
@@ -56,7 +56,7 @@ def test_run(example_waters, schnet):
 
 def test_ase(schnet):
     h2o = build.molecule('H2O')
-    calc = spk.interfaces.SpkCalculator(schnet, energy='energy', forces='forces')
+    calc = SpkCalculator(schnet, energy='energy', forces='forces')
     h2o.set_calculator(calc)
     h2o.get_forces()
     assert h2o.get_forces().shape == (3, 3)
@@ -66,7 +66,6 @@ def test_ase(schnet):
     assert len(traj) > 0
 
     # Test sending it as a message
-    msg = SPKCalculatorMessage(schnet)
-    calc = pkl.loads(pkl.dumps(msg))
-    traj = MolecularDynamics().run_sampling(h2o, 100, calc, timestep=0.1)
+    calc_2 = pkl.loads(pkl.dumps(calc))
+    traj = MolecularDynamics().run_sampling(h2o, 100, calc_2, timestep=0.1)
     assert len(traj) > 0
