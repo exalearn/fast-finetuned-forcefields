@@ -23,7 +23,7 @@ def ff():
 
 def test_load_schnet(test_file_path):
     """Test loading a model from disk"""
-    model = load_pretrained_model(test_file_path / 'example-schnet.pt', 1, 0.1, 10)
+    model = load_pretrained_model(test_file_path / 'example-schnet.pt', 1, 0.1, 10, device='cpu')
     assert model.mean == 1.
     assert model.std == 0.1
 
