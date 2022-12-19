@@ -113,6 +113,9 @@ class GCSchNetForcefield(BaseLearnableForcefield):
                 patience = num_epochs // 8
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=patience, factor=0.8, min_lr=1e-6)
 
+            # Store the best loss
+            best_loss = torch.inf
+
             # Loop over epochs
             log = []
             model.train()
@@ -168,7 +171,15 @@ class GCSchNetForcefield(BaseLearnableForcefield):
                 # Reduce the learning rate
                 scheduler.step(valid_losses['valid_loss_total'])
 
+                # Save the best model if possible
+                if valid_losses['valid_loss_total'] < best_loss:
+                    best_loss = valid_losses['valid_loss_total']
+                    torch.save(model, td / 'best_model')
+
                 # Store the log line
                 log.append({'epoch': epoch, 'time': time.perf_counter() - start_time, **train_losses, **valid_losses})
 
-            return TorchMessage(model), pd.DataFrame(log)
+            # Load the best model back in
+            best_model = torch.load(td / 'best_model', map_location='cpu')
+
+            return TorchMessage(best_model), pd.DataFrame(log)
