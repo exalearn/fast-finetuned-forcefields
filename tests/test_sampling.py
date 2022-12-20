@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import ase
 from ase.calculators.lj import LennardJones
 from ase.calculators.singlepoint import SinglePointCalculator
@@ -41,11 +43,14 @@ def test_mctbp(cluster):
     assert len(traj_atoms) > 4
 
 
-def test_mhm(cluster):
+def test_mhm(cluster, tmpdir):
     calc = TTMCalculator()
-    mhm = MHMSampler()
+    mhm = MHMSampler(scratch_dir=tmpdir)
     min_atoms, traj_atoms = mhm.run_sampling(cluster, 2, calc)
 
     assert isinstance(min_atoms, ase.Atoms)
     assert len(traj_atoms) > 4
+    assert any(a.info['mhm-source'].startswith('md') for a in traj_atoms)
+    assert any(a.info['mhm-source'].startswith('qn') for a in traj_atoms)
 
+    assert len(list(Path(tmpdir).glob("*"))) == 0
