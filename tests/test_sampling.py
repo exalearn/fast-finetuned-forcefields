@@ -2,10 +2,12 @@ import ase
 from ase.calculators.lj import LennardJones
 from ase.calculators.singlepoint import SinglePointCalculator
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+from ase.optimize.minimahopping import MinimaHopping
 from ttm.ase import TTMCalculator
 
 from fff.sampling.md import MolecularDynamics
 from fff.sampling.mctbp import optimize_structure, MCTBP
+from fff.sampling.mhm import MHMSampler
 
 
 def test_md(atoms):
@@ -37,3 +39,13 @@ def test_mctbp(cluster):
 
     assert isinstance(min_atoms, ase.Atoms)
     assert len(traj_atoms) > 4
+
+
+def test_mhm(cluster):
+    calc = TTMCalculator()
+    mhm = MHMSampler()
+    min_atoms, traj_atoms = mhm.run_sampling(cluster, 2, calc)
+
+    assert isinstance(min_atoms, ase.Atoms)
+    assert len(traj_atoms) > 4
+
