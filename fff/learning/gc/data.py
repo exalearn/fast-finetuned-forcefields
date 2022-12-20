@@ -26,18 +26,19 @@ def convert_atoms_to_pyg(mol: Atoms, types: Optional[dict[str, int]] = None) -> 
     if types is None:
         types = default_types
 
+    # Center the cluster around 0
+    pos = mol.get_positions() - mol.get_center_of_mass()
+    pos = torch.tensor(pos, dtype=torch.float)  # coordinates
+
     # Only operate if there is a calculator
-    y = None  # potential energy
-    f = None  # gradients (forces)
+    y = torch.zeros((), dtype=torch.float)  # potential energy
+    f = torch.zeros_like(pos)
     if mol.calc is not None:
         results = mol.calc.results
         if 'energy' in results:
             y = torch.tensor(mol.get_potential_energy(), dtype=torch.float)  # potential energy
         if 'forces' in results:
             f = torch.tensor(mol.get_forces(), dtype=torch.float)  # gradients
-
-    pos = mol.get_positions() - mol.get_center_of_mass()
-    pos = torch.tensor(pos, dtype=torch.float)  # coordinates
 
     # Convert it to a PyG data record
     size = int(pos.size(dim=0) / 3)
