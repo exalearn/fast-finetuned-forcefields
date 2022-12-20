@@ -28,28 +28,34 @@ class MHMSampler(CalculatorBasedSampler):
         atoms.set_calculator(calc)
 
         # Run all this in a subdirectory
-        try:
-            with TemporaryDirectory(dir=self.scratch_dir) as tmp:
-                tmp = Path(tmp)
+        with TemporaryDirectory(dir=self.scratch_dir, prefix='mhm-') as tmp:
+            try:
+                tmp = Path(tmp).absolute()
                 os.chdir(tmp)
 
                 # Make the minima hopping class with any user-provided options
-                mhm = MinimaHopping(atoms=atoms, **kwargs)
+                mhm = MinimaHopping(atoms=atoms, opt_maxsteps=100, **kwargs)
 
                 # Run for a certain number of iterations
                 mhm(totalsteps=steps)
 
                 # Get the structures that are output by the run
-                with Trajectory(tmp / 'minima.traj', mode='r') as traj:
-                    minima = [a for a in traj]
+                minima = []
+                with Trajectory('minima.traj', mode='r') as traj:
+                    for i, a in enumerate(traj):
+                        a.info['mhm-source'] = f'min-{i}'
+                        minima.append(a)
 
                 # Get the structures that are produced along the way
                 all_steps = []
-                for f in chain(tmp.glob('qn[0-9]*.traj')):
-                    with Trajectory(tmp / f, mode='r') as traj:
-                        new_steps = [a for a in traj]
+                for f in chain(tmp.glob('md[0-9]*.traj'), tmp.glob('qn[0-9]*.traj')):
+                    with Trajectory(f, mode='r') as traj:
+                        new_steps = []
+                        for i, a in enumerate(traj):
+                            a.info['mhm-source'] = f'{f.name[:-5]}-{i}'
+                            new_steps.append(a)
                         all_steps.extend(new_steps[1:-1])  # Not the first or last
 
                 return minima[-1], minima[1:-1] + all_steps
-        finally:
-            os.chdir(old_path)  # Go back to where we started
+            finally:
+                os.chdir(old_path)  # Go back to where we started
