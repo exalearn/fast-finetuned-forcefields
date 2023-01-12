@@ -9,7 +9,7 @@ dependencies:
   - pandas==1.*
   - pydantic
   - pymongo
-  - psi4
+  - psi4==1.6.*
   - tqdm
   - jupyterlab
   - matplotlib
