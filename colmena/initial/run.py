@@ -16,6 +16,7 @@ import sys
 
 import ase
 from ase.db import connect
+from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from colmena.models import Result
 from colmena.queue import PipeQueues, ColmenaQueues
 from colmena.thinker import BaseThinker, event_responder, result_processor, ResourceCounter, task_submitter
@@ -30,6 +31,8 @@ from fff.learning.gc.functions import GCSchNetForcefield
 from fff.learning.gc.models import SchNet, load_pretrained_model
 from fff.learning.util.messages import TorchMessage
 from fff.sampling.mctbp import MCTBP
+from fff.sampling.md import MolecularDynamics
+from fff.sampling.mhm import MHMSampler
 from fff.simulation import run_calculator
 from fff.simulation.utils import read_from_string, write_to_string
 
@@ -49,6 +52,7 @@ class Trajectory:
     last_validated: ase.Atoms = None  # Last validated point on the trajectory
     current: ase.Atoms = None  # Last point produced along the trajectory
     last_run_length: int = 0  # How long between current and last_validated
+    name: str = None  # Name of the trajectory
 
     def __post_init__(self):
         self.last_validated = self.current = self.starting
@@ -116,6 +120,7 @@ class Thinker(BaseThinker):
             search_path: Path,
             model: SchNet,
             energy_tolerance: float,
+            max_force: float,
             min_run_length: int,
             max_run_length: int,
             samples_per_run: int,
@@ -139,6 +144,7 @@ class Thinker(BaseThinker):
             n_to_run: Number of simulations to run
             n_models: Number of models to train in the ensemble
             energy_tolerance: How large of an energy difference to accept when auditing
+            max_force: Structures with forces larger than this threshold will be excluded from training sets
             min_run_length: Minimum length of sampling runs
             max_run_length: Minimum length of sampling runs
             samples_per_run: Number of samples to produce during a sampling run
@@ -165,10 +171,11 @@ class Thinker(BaseThinker):
         self.min_run_length = min_run_length
         self.max_run_length = max_run_length
         self.samples_per_run = samples_per_run
+        self.max_force = max_force
 
         # Load in the search space
         with connect(search_path) as db:
-            self.search_space = [Trajectory(i, x.toatoms()) for i, x in enumerate(db.select(''))]
+            self.search_space = [Trajectory(i, x.toatoms(), name=x.get('filename', f'traj-{i}')) for i, x in enumerate(db.select(''))]
             shuffle(self.search_space)
             self.search_space = deque(self.search_space)
         self.logger.info(f'Loaded a search space of {len(self.search_space)} geometries at {search_path}')
@@ -239,12 +246,17 @@ class Thinker(BaseThinker):
             all_examples = np.array([x.toatoms() for x in db.select("")], dtype=object)
         self.logger.info(f'Loaded {len(all_examples)} training examples')
 
+        # Remove the unrealistic structures
+        if self.max_force is not None:
+            all_examples = [a for a in all_examples if np.abs(a.get_forces()).max() < self.max_force]
+            self.logger.info(f'Reduced the number of training examples to {len(all_examples)} with forces less than {self.max_force:.2f} eV/A.')
+
         # Sample the training sets and proxy them
         train_sets = []
         valid_sets = []
         n_train = int(len(all_examples) * 0.9)
         for _ in range(self.n_models):
-            np.random.shuffle(all_examples)
+            shuffle(all_examples)
             train_sets.append(all_examples[:n_train])
             valid_sets.append(all_examples[n_train:])
 
@@ -262,7 +274,7 @@ class Thinker(BaseThinker):
                 valid_sets[i],
                 method='train',
                 topic='train',
-                task_info={'model_id': i, 'training_round': self.training_round},
+                task_info={'model_id': i, 'training_round': self.training_round, 'train_size': len(all_examples)}
             )
             self.training_incomplete += 1
         self.logger.info('TIMING - Finish train_models')
@@ -358,6 +370,11 @@ class Thinker(BaseThinker):
         trajectory = self.search_space.popleft()
         starting_point = trajectory.starting
 
+        # Initialize the structure if need be
+        if trajectory.current_timestep == 0:
+            MaxwellBoltzmannDistribution(starting_point, temperature_K=100)
+            self.logger.info('Initialized temperature to 100K')
+
         # Add the structure to a list of those being validated
         self.to_audit[trajectory.id] = trajectory
 
@@ -410,13 +427,13 @@ class Thinker(BaseThinker):
             audit, traj = result.value
             self.logger.info(f'Produced {len(traj)} new structures')
 
+            # Save how many were produced
+            result.task_info['num_produced'] = len(traj)  # First was the initial structure
+
             # Down-sample to target count if needed
             if len(traj) > self.samples_per_run:
                 traj = sample(traj, self.samples_per_run)
                 self.logger.info(f'Downsampled to {len(traj)}')
-
-            # Save how many were produced
-            result.task_info['num_produced'] = len(traj)  # First was the initial structure
 
             # Update the state of the trajectory
             self.to_audit[traj_id].update_current_structure(audit, result.task_info['run_length'])
@@ -579,7 +596,7 @@ class Thinker(BaseThinker):
         n_atoms = np.array([len(a) for a in structures])
         energy_std = np.std(np.divide(energies, n_atoms[:, None]), axis=1)
 
-        # Make the structures and traj_ids a ndarray so we can slice it easier
+        # Make the structures and traj_ids a ndarray, so we can slice it easier
         structures = np.array(structures, dtype=object)
         traj_ids = np.array(traj_ids)
 
@@ -605,14 +622,15 @@ class Thinker(BaseThinker):
             corr = (np.dot(energies_minus_mean, worst_energies) /
                     np.sqrt(np.power(energies_minus_mean, 2).sum(axis=1)
                             * np.power(worst_energies, 2).sum()))
+            corr = np.abs(corr)
 
             #  Use argpartition to find the 95% that are least correlated
             worst_to_exclude = int(len(structures) * 0.05) + 1
-            sorted_corrs = np.argpartition(-np.abs(corr), kth=worst_to_exclude)  # largest corrs up front
+            sorted_corrs = np.argpartition(-corr, kth=worst_to_exclude)  # largest corrs up front
             to_pick = sorted_corrs[worst_to_exclude:]
-            assert worst_pred_ind not in to_pick, "You got the sorting backwards"
+            assert corr[to_pick].mean() <= corr.mean(), "You got the sorting backwards"
 
-            #  Remove these tasks from the list
+            #  Only include the least correlated
             energy_std = energy_std[to_pick]
             energies = energies[to_pick, :]
             traj_ids = traj_ids[to_pick]
@@ -681,16 +699,16 @@ class Thinker(BaseThinker):
             self.rec.reallocate('simulate', 'sample', 1, block=False, callback=self.reallocating.clear)
         self.rec.release('simulate', 1)
 
-        # Count the completed calculation
-        self.num_complete += 1
-        self.logger.info(f'Evaluated {self.num_complete}/{self.num_to_run} structures')
-        if self.num_complete >= self.num_to_run:
-            self.done.set()
-
         # Store the result in the database if successful
         task_type = result.task_info['task_type']
         proxy = result.value
         if result.success:
+            # Count the completed calculation
+            self.num_complete += 1
+            self.logger.info(f'Evaluated {self.num_complete}/{self.num_to_run} structures')
+            if self.num_complete >= self.num_to_run:
+                self.done.set()
+
             # Store the simulation energy for later analysis
             atoms: ase.Atoms = read_from_string(result.value, 'json')
             dft_energy = atoms.get_potential_energy()
@@ -720,8 +738,13 @@ class Thinker(BaseThinker):
 
             # Store in the training set
             if difference < 1e6:
+                # Get information about the trajectory
+                if traj_id in self.to_audit:
+                    traj = self.to_audit[traj_id]
+                else:
+                    traj = next(x for x in self.search_space if x.id == traj_id)
                 with connect(self.db_path) as db:
-                    db.write(atoms, runtime=result.time_running)
+                    db.write(atoms, runtime=result.time_running, source=task_type, filename=traj.name)
             else:
                 self.logger.info('Difference is too large. Not storing as this structure is unrealistic')
 
@@ -737,6 +760,9 @@ class Thinker(BaseThinker):
             # If the calculation failed, we mark the validation as failed
             traj = self.to_audit.pop(traj_id)
             traj.set_validation(False)
+
+            # Also add it back to the search space
+            self.search_space.append(traj)
 
             # Add a large error value to the queue
             self.audit_results.append(10 / traj.last_run_length)  # 10 eV/atom is much larger than our typical error
@@ -782,12 +808,14 @@ if __name__ == '__main__':
     group.add_argument("--ensemble-size", type=int, default=8, help="Number of models to train to create ensemble")
     group.add_argument("--retrain-freq", type=int, default=10,
                        help="Restart training after this many new training points")
-    group.add_argument('--huber-deltas', type=float, default=None, nargs=2,
+    group.add_argument('--huber-deltas', type=float, default=(0.1, 10), nargs=2,
                        help="Huber delta for the energy and forces")
+    group.add_argument('--max-force', type=float, default=None, help='Maximum force allowed in training set. Used to screen out unrealistic structures')
 
     # Parameters related to sampling for new structures
     group = parser.add_argument_group(title="Sampling Settings")
     #  TODO (wardlt): Switch to using a different endpoint for simulation and sampling tasks?
+    group.add_argument("--sampling-method", choices=['md', 'mctbp', 'mhm'], default='mctbp', help='Method used to sample structures')
     group.add_argument("--num-samplers", type=int, default=1, help="Number of agents to use to sample structures")
     group.add_argument("--min-run-length", type=int, default=1,
                        help="Minimum timesteps to run sampling calculations.")
@@ -847,7 +875,7 @@ if __name__ == '__main__':
     # Prepare the output directory and logger
     start_time = datetime.utcnow()
     params_hash = hashlib.sha256(json.dumps(run_params).encode()).hexdigest()[:6]
-    out_dir = Path('runs') / f'{args.calculator}-{start_time.strftime("%y%b%d-%H%M%S")}-{params_hash}'
+    out_dir = Path('runs') / f'{args.calculator}-{args.sampling_method}-{start_time.strftime("%y%b%d-%H%M%S")}-{params_hash}'
     out_dir.mkdir(parents=True)
 
     # Make a copy of the training data
@@ -918,14 +946,28 @@ if __name__ == '__main__':
 
 
     schnet = GCSchNetForcefield()
-    sampler = MCTBP()
 
     my_train_schnet = _wrap(schnet.train, num_epochs=args.num_epochs, device='cuda',
-                            learning_rate=5e-4, batch_size=64, patience=8, reset_weights=False,
+                            patience=8, reset_weights=False,
                             huber_deltas=args.huber_deltas)
     my_eval_schnet = _wrap(schnet.evaluate, device='cuda')
-    my_run_dynamics = _wrap(sampler.run_sampling, device='cpu')
     my_run_simulation = _wrap(run_calculator, calc=calc, temp_path=str(out_dir.absolute()))
+
+    # Determine which sampling method to use
+    sampler_kwargs = {}
+    if args.sampling_method == 'md':
+        sampler = MolecularDynamics()
+        sampler_kwargs = {'timestep': 0.1, 'log_interval': 10}
+    elif args.sampling_method == 'mctbp':
+        sampler = MCTBP()
+    elif args.sampling_method == 'mhm':
+        mhm_dir = out_dir / 'mhm'
+        mhm_dir.mkdir()
+        sampler = MHMSampler(scratch_dir=mhm_dir)
+    else:
+        raise ValueError(f'Sampling method not supported: {args.sampling_method}')
+
+    my_run_dynamics = _wrap(sampler.run_sampling, device='cuda', **sampler_kwargs)
 
     # Create the task server
     if args.parsl:
@@ -970,7 +1012,8 @@ if __name__ == '__main__':
         max_run_length=args.max_run_length,
         samples_per_run=args.num_frames,
         retrain_freq=args.retrain_freq,
-        ps_names=ps_names
+        ps_names=ps_names,
+        max_force=args.max_force
     )
     logging.info('Created the method server and task generator')
 
