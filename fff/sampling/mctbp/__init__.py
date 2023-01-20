@@ -133,7 +133,7 @@ class MCTBP(CalculatorBasedSampler):
                     new_cluster = opt_new_cluster
                     curr_e = new_e
 
-        return True, None, new_cluster, sampled_structures
+        return True, None, new_cluster, all_sampled
 
 
 def optimize_structure(atoms: ase.Atoms, calc: Calculator, scratch_dir: Path | None = None,
