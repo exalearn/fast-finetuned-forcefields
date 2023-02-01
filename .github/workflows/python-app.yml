@@ -22,7 +22,7 @@ jobs:
     - name: Set up environment
       uses: conda-incubator/setup-miniconda@v2
       with:
-        minconda-version: "latest"
+        miniconda-version: "latest"
         environment-file: envs/environment-cpu.yml
         python-version: "3.10.*"
     - name: Install test dependencies
