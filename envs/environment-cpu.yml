@@ -5,7 +5,7 @@ channels:
   - psi4/label/dev
   - conda-forge
 dependencies:
-  - python==3.10.8
+  - python==3.10.*
   - pandas==1.*
   - pydantic
   - pymongo
