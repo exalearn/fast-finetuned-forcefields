@@ -1,10 +1,12 @@
 """Minima hopping method, as implemented in ASE"""
+from functools import partialmethod
 from itertools import chain
 from tempfile import TemporaryDirectory
 from pathlib import Path
 import os
 
 from ase.io import Trajectory
+from ase.optimize import QuasiNewton
 from ase.optimize.minimahopping import MinimaHopping
 from ase.calculators.calculator import Calculator
 import ase
@@ -34,7 +36,9 @@ class MHMSampler(CalculatorBasedSampler):
                 os.chdir(tmp)
 
                 # Make the minima hopping class with any user-provided options
-                mhm = MinimaHopping(atoms=atoms, opt_maxsteps=100, **kwargs)
+                opt = QuasiNewton
+                opt.run = partialmethod(opt.run, steps=100)
+                mhm = MinimaHopping(atoms=atoms, optimizer=opt, **kwargs)
 
                 # Run for a certain number of iterations
                 mhm(totalsteps=steps)
