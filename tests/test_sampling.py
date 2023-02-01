@@ -44,7 +44,7 @@ def test_mctbp(cluster):
 def test_mhm(cluster, tmpdir):
     calc = TTMCalculator()
     mhm = MHMSampler(scratch_dir=tmpdir)
-    min_atoms, traj_atoms = mhm.run_sampling(cluster, 2, calc)
+    min_atoms, traj_atoms = mhm.run_sampling(cluster, 4, calc)
 
     assert isinstance(min_atoms, ase.Atoms)
     assert len(traj_atoms) > 4
