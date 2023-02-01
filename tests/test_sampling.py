@@ -3,8 +3,6 @@ from pathlib import Path
 import ase
 from ase.calculators.lj import LennardJones
 from ase.calculators.singlepoint import SinglePointCalculator
-from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-from ase.optimize.minimahopping import MinimaHopping
 from ttm.ase import TTMCalculator
 
 from fff.sampling.md import MolecularDynamics
@@ -14,10 +12,10 @@ from fff.sampling.mhm import MHMSampler
 
 def test_md(atoms):
     calc = LennardJones()
-    MaxwellBoltzmannDistribution(atoms, temperature_K=60)
     md = MolecularDynamics()
-    atoms, traj = md.run_sampling(atoms, 1000, calc, timestep=1, log_interval=100)
+    atoms, traj = md.run_sampling(atoms, 1000, calc, timestep=1, log_interval=100, temperature=100)
     assert len(traj) == 9
+    assert atoms.get_temperature() > 25
 
     # Make sure it has both the energy and the forces
     assert isinstance(traj[0].calc, SinglePointCalculator)  # SPC is used to store results

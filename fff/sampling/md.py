@@ -9,6 +9,7 @@ from ase.md import VelocityVerlet
 from ase.io import Trajectory
 from ase import units
 import ase
+from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 
 from .base import CalculatorBasedSampler
 
@@ -18,7 +19,8 @@ logger = logging.getLogger(__name__)
 class MolecularDynamics(CalculatorBasedSampler):
     """Sample new structures using molecular dynamics"""
 
-    def _run_sampling(self, atoms: ase.Atoms, steps: int, calc: Calculator, timestep: float = 5, log_interval: int | None = None)\
+    def _run_sampling(self, atoms: ase.Atoms, steps: int, calc: Calculator, timestep: float = 5,
+                      log_interval: int | None = None, temperature: float | None = None)\
             -> (ase.Atoms, list[ase.Atoms]):
         """Run molecular dynamics to produce a list of sampled structures
 
@@ -28,12 +30,17 @@ class MolecularDynamics(CalculatorBasedSampler):
             calc: Calculator used to compute energy and forces
             timestep: Timestep size (units: fs)
             log_interval: Number of steps between storing structures. Defaults to 100 structures per run
-        Returns:
+            temperature: Temperature at which ot initialize structure. If ``None``, do not re-initialize temperature. (units: K)
+        Return:
             - List of structures sampled along the way
         """
 
         # Set the calculator
         atoms.calc = calc
+
+        # Set temperature, if needed
+        if temperature is not None:
+            MaxwellBoltzmannDistribution(atoms, temperature_K=temperature)
 
         # Define the dynamics
         dyn = VelocityVerlet(atoms, timestep=timestep * units.fs)
