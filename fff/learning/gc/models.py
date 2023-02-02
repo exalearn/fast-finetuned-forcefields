@@ -55,7 +55,7 @@ def load_pretrained_model(
 
     if load_state:
         # load trained weights into model
-        net.load_state_dict(state)
+        net.load_state_dict(state, strict=False)
         logger.info('model weights loaded')
 
     # register backward hook --> gradient clipping
@@ -128,6 +128,8 @@ class SchNet(nn.Module):
         self.act = ShiftedSoftplus()
         self.lin2 = nn.Linear(self.num_features // 2, 1)
 
+        self.atom_ref = nn.Embedding(100, 1, padding_idx=0)
+
         self.reset_parameters()
 
     def hyperparameters(self):
@@ -167,6 +169,7 @@ class SchNet(nn.Module):
         zeros_(self.lin1.bias)
         xavier_uniform_(self.lin2.weight)
         zeros_(self.lin2.bias)
+        zeros_(self.atom_ref.weight)
 
     def forward(self, data):
         """
@@ -219,6 +222,10 @@ class SchNet(nn.Module):
 
         if self.mean is not None and self.std is not None:
             h = h * self.std + self.mean
+
+        # Add atomic reference energies
+        atom_ref = self.atom_ref(data.z.long())
+        h = h + atom_ref
 
         mask = (data.z == 0).view(-1, 1)
         h = h.masked_fill(mask.expand_as(h), 0.)
