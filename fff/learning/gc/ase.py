@@ -68,4 +68,4 @@ class SchnetCalculator(Calculator):
             self.net.to(self.device)
         energy, gradients = eval_batch(self.net, data)
         self.results['energy'] = energy.item()
-        self.results['forces'] = gradients.detach().numpy().squeeze()
+        self.results['forces'] = gradients.cpu().detach().numpy().squeeze()
