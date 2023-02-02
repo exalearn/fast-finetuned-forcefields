@@ -1,6 +1,8 @@
 """Functions that use the model through interfaces designed for workflow engines"""
+import os
 import time
 from collections import defaultdict
+from contextlib import redirect_stderr
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -33,12 +35,13 @@ def eval_batch(model: SchNet, batch: Data) -> (torch.Tensor, torch.Tensor):
 
 
 class GCSchNetForcefield(BaseLearnableForcefield):
+    """Standardized interface to Graphcore's implementation of SchNet"""
 
     def evaluate(self,
                  model_msg: ModelMsgType,
                  atoms: list[ase.Atoms],
                  batch_size: int = 64,
-                 device: str = 'cpu') -> (list[float], list[np.ndarray]):
+                 device: str = 'cpu') -> tuple[list[float], list[np.ndarray]]:
         model = self.get_model(model_msg)
 
         # Place the model on the GPU in eval model
@@ -47,8 +50,9 @@ class GCSchNetForcefield(BaseLearnableForcefield):
 
         with TemporaryDirectory() as tmp:
             # Make the data loader
-            dataset = AtomsDataset.from_atoms(atoms, root=tmp)
-            loader = DataLoader(dataset, batch_size=batch_size)
+            with open(os.devnull, 'w') as fp, redirect_stderr(fp):
+                dataset = AtomsDataset.from_atoms(atoms, root=tmp)
+                loader = DataLoader(dataset, batch_size=batch_size)
 
             # Run all entries
             energies = []
@@ -82,7 +86,7 @@ class GCSchNetForcefield(BaseLearnableForcefield):
               batch_size: int = 32,
               learning_rate: float = 1e-3,
               huber_deltas: (float, float) = (0.5, 1),
-              energy_weight: float = 0.9,
+              energy_weight: float = 0.1,
               reset_weights: bool = False,
               patience: int = None) -> (TorchMessage, pd.DataFrame):
 
@@ -101,11 +105,12 @@ class GCSchNetForcefield(BaseLearnableForcefield):
         with TemporaryDirectory(prefix='spk') as td:
             td = Path(td)
             # Save the batch to an ASE Atoms database
-            train_dataset = AtomsDataset.from_atoms(train_data, td / 'train')
-            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+            with open(os.devnull, 'w') as fp, redirect_stderr(fp):
+                train_dataset = AtomsDataset.from_atoms(train_data, td / 'train')
+                train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
-            valid_dataset = AtomsDataset.from_atoms(valid_data, td / 'valid')
-            valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False)
+                valid_dataset = AtomsDataset.from_atoms(valid_data, td / 'valid')
+                valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False)
 
             # Make the trainer
             optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
