@@ -8,7 +8,7 @@ python run.py \
     --sampling-method mctbp \
     --num-qc-workers 1 \
     --min-run-length 2 \
-    --max-run-length 200 \
+    --max-run-length 100 \
     --num-frames 200 \
     --num-epochs 128 \
     --ensemble-size 4 \
@@ -20,4 +20,4 @@ python run.py \
     --num-to-run 250 \
     --parsl \
     --parsl-site local \
-    --train-ps-backend file
+    --no-proxy-store
