@@ -55,6 +55,7 @@ def test_run(model, ff, tmp_path):
 
 def test_train(model, example_waters, ff):
     model, log = ff.train(model, example_waters[:8], example_waters[8:], 8)
+    assert 'lr' in log.columns
     assert len(log) == 8
 
 
