@@ -67,7 +67,7 @@ class MolecularDynamics(CalculatorBasedSampler):
                     dyn.run(steps)
 
                 # Read the trajectory back in and return the atoms
-                with Trajectory(Trajectory(str(traj_path), mode='r')) as traj:
+                with Trajectory(str(traj_path), mode='r') as traj:
                     traj_atoms = [x for x in traj]
                 return atoms, traj_atoms[1:-1]
             finally:
