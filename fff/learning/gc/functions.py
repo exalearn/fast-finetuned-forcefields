@@ -182,7 +182,8 @@ class GCSchNetForcefield(BaseLearnableForcefield):
                     torch.save(model, td / 'best_model')
 
                 # Store the log line
-                log.append({'epoch': epoch, 'time': time.perf_counter() - start_time, **train_losses, **valid_losses})
+                log.append({'epoch': epoch, 'time': time.perf_counter() - start_time, 'lr': optimizer.param_groups[0]['lr'],
+                            **train_losses, **valid_losses})
 
             # Load the best model back in
             best_model = torch.load(td / 'best_model', map_location='cpu')

@@ -58,7 +58,7 @@ class CalculatorBasedSampler(BaseSampler):
         if isinstance(calc, (SpkCalculator, SchnetCalculator)):
             calc.to(device)
 
-        return self._run_sampling(atoms, steps, calc, **kwargs)
+        return self._run_sampling(atoms.copy(), steps, calc, **kwargs)
 
     @abstractmethod
     def _run_sampling(self, atoms: ase.Atoms, steps: int, calc: Calculator, **kwargs) -> (ase.Atoms, list[ase.Atoms]):
