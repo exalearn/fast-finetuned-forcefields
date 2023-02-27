@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import ase
+import numpy as np
 from ase.calculators.lj import LennardJones
 from ase.calculators.singlepoint import SinglePointCalculator
 from ttm.ase import TTMCalculator
@@ -13,9 +14,15 @@ from fff.sampling.mhm import MHMSampler
 def test_md(atoms):
     calc = LennardJones()
     md = MolecularDynamics()
-    atoms, traj = md.run_sampling(atoms, 1000, calc, timestep=1, log_interval=100, temperature=100)
+    md_atoms, traj = md.run_sampling(atoms, 1000, calc, timestep=1, log_interval=100, temperature=100)
     assert len(traj) == 9
-    assert atoms.get_temperature() > 25
+    assert md_atoms.get_temperature() > 25
+
+    # Ensure the structures are different
+    assert not np.isclose(atoms.positions, md_atoms.positions).all()
+    assert not np.isclose(traj[0].positions, atoms.positions).all()
+    assert not np.isclose(traj[-1].positions, md_atoms.positions).all()
+    assert not np.isclose(traj[0].positions, traj[-1].positions).all()
 
     # Make sure it has both the energy and the forces
     assert isinstance(traj[0].calc, SinglePointCalculator)  # SPC is used to store results
