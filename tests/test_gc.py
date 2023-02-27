@@ -2,6 +2,7 @@ import ase
 import numpy as np
 import pickle as pkl
 
+import torch
 from ase import build
 from pytest import fixture
 
@@ -26,6 +27,7 @@ def test_load_schnet(test_file_path):
     model = load_pretrained_model(test_file_path / 'example-schnet.pt', 1, 0.1, 10, device='cpu')
     assert model.mean == 1.
     assert model.std == 0.1
+    assert model.atom_ref.weight.detach().numpy().max() == 0
 
 
 def test_data_loader(example_waters, tmp_path):
@@ -43,6 +45,12 @@ def test_run(model, ff, tmp_path):
     assert len(energies) == 4
     assert forces[0].shape == (3, 3)
     assert len(forces)
+
+    # Change the atomref for H
+    with torch.no_grad():
+        model.atom_ref.weight[1] = -1
+    new_energies, _ = ff.evaluate(model, [water] * 4)
+    assert np.isclose(np.subtract(new_energies, energies), -2).all()
 
 
 def test_train(model, example_waters, ff):
