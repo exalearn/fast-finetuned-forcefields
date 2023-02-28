@@ -129,6 +129,8 @@ class Thinker(BaseThinker):
             n_to_run: int,
             n_models: int,
             n_qc_workers: int,
+            queue_length: int,
+            queue_tolerance: float,
             retrain_freq: int,
             ps_names: Dict[str, str],
     ):
@@ -148,6 +150,8 @@ class Thinker(BaseThinker):
             min_run_length: Minimum length of sampling runs
             max_run_length: Minimum length of sampling runs
             samples_per_run: Number of samples to produce during a sampling run
+            queue_length: Target number of audit calculations to have in queue
+            queue_tolerance: Fraction queue length can vary before we reallocate workers (should be <<1)
             retrain_freq: How often to trigger retraining
             ps_names: Mapping of task type to ProxyStore object associated with it
         """
@@ -171,6 +175,8 @@ class Thinker(BaseThinker):
         self.min_run_length = min_run_length
         self.max_run_length = max_run_length
         self.samples_per_run = samples_per_run
+        self.queue_length = queue_length
+        self.queue_tolerance = queue_tolerance
         self.max_force = max_force
 
         # Load in the search space
@@ -292,14 +298,6 @@ class Thinker(BaseThinker):
             # Unpack the result and training history
             model_msg, train_log = result.value
 
-            # Store the result to disk
-            model_dir = self.out_dir / 'models'
-            model_dir.mkdir(exist_ok=True)
-            model_path = model_dir / f'model-{model_id}-round-{self.training_round}'
-            with open(model_path, 'wb') as fp:
-                torch.save(model_msg.get_model(), fp)
-            self.logger.info(f'Saved model to: {model_path}')
-
             # Save the training data
             with open(self.out_dir / 'training-history.json', 'a') as fp:
                 print(json.dumps(train_log.to_dict(orient='list')), file=fp)
@@ -309,7 +307,7 @@ class Thinker(BaseThinker):
                 # Update the active model
                 if 'sample' in self.ps_names:
                     sample_store = ps.store.get_store(self.ps_names['sample'])
-                    sample_store.evict(get_key(self.active_model_proxy))
+                    # sample_store.evict(get_key(self.active_model_proxy))  # TODO (wardlt): Evict only when I can ensure it's no longer used.
                     self.active_model_proxy = sample_store.proxy(SchnetCalculator(model_msg.get_model()))
                 else:
                     self.active_model_proxy = SchnetCalculator(model_msg.get_model())
@@ -324,10 +322,6 @@ class Thinker(BaseThinker):
                 # Evict the previous inference model
                 inf_store = ps.store.get_store(self.ps_names['train'])
                 prev_model = self.inference_proxies[model_id]
-                if prev_model is not None:
-                    prev_key = get_key(prev_model)
-                    inf_store.evict(prev_key)
-                    self.logger.info(f'Evicted the previous model for model {model_id}')
 
                 # Store the next model
                 self.inference_proxies[model_id] = inf_store.proxy(model_msg)
@@ -408,7 +402,7 @@ class Thinker(BaseThinker):
         self.logger.info(f'Received sampling result for trajectory {traj_id}. Success: {result.success}')
 
         # Determine whether we should re-allocate resources
-        if len(self.task_queue_audit) > self.n_qc_workers * 2 and \
+        if len(self.task_queue_audit) > self.queue_length * (1 + self.queue_tolerance) and \
                 self.rec.allocated_slots('sample') > 0 and \
                 not self.reallocating.is_set():
             self.reallocating.set()
@@ -686,7 +680,7 @@ class Thinker(BaseThinker):
         self.logger.info(f'Received a simulation from trajectory {traj_id}. Success: {result.success}')
 
         # Reallocate resources if the task queue is getting too small
-        if len(self.task_queue_audit) <= self.n_qc_workers and \
+        if len(self.task_queue_audit) <= self.queue_length * (1 - self.queue_tolerance) and \
                 self.rec.allocated_slots('simulate') > 0 and \
                 not self.reallocating.is_set():
             self.reallocating.set()
@@ -790,7 +784,7 @@ if __name__ == '__main__':
     # Problem configuration
     group = parser.add_argument_group(title='Problem Definition',
                                       description='Defining the search space, models and optimizers-related settings')
-    group.add_argument('--starting-model', help='Path to the MPNN h5 files', required=True)
+    group.add_argument('--starting-model', help='Path to a torch checkpoint file', required=True)
     group.add_argument('--training-set', help='Path to ASE DB used to train the initial models', required=True)
     group.add_argument('--search-space', help='Path to ASE DB of starting structures for molecular dynamics sampling',
                        required=True)
@@ -826,11 +820,16 @@ if __name__ == '__main__':
 
 
     # Parameters related to active learning
-    group = parser.add_argument_group(title='Active Learning')
+    group = parser.add_argument_group(title='Scheduling', description='Settings related to how we schedule active learning tasks')
     group.add_argument('--infer-chunk-size', type=int, default=100,
                        help='Number of structures to send together')
     group.add_argument('--infer-pool-size', type=int, default=2,
                        help='Number of inference chunks to complete before picking next tasks')
+    group.add_argument('--queue-length', type=int, default=8,
+                       help='Target number of audit tasks to have waiting to be run.')
+    group.add_argument('--queue-tolerance', type=float, default=0.2,
+                       help='Fraction audit queue can vary before we reallocate resources.')
+    
 
     # Parameters related to ProxyStore
     known_ps = [None, 'redis', 'file', 'globus']
@@ -1017,7 +1016,9 @@ if __name__ == '__main__':
         samples_per_run=args.num_frames,
         retrain_freq=args.retrain_freq,
         ps_names=ps_names,
-        max_force=args.max_force
+        max_force=args.max_force,
+        queue_length=args.queue_length,
+        queue_tolerance=args.queue_tolerance,
     )
     logging.info('Created the method server and task generator')
 
