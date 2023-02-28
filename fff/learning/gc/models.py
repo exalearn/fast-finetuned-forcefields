@@ -4,7 +4,6 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn.init import xavier_uniform_, zeros_
 from torch_geometric.nn import knn_graph, radius_graph
 from torch_geometric.nn.models.schnet import GaussianSmearing, \
