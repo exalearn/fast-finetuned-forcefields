@@ -16,7 +16,6 @@ import sys
 
 import ase
 from ase.db import connect
-from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from colmena.models import Result
 from colmena.queue import ColmenaQueues
 from colmena.queue.redis import RedisQueues
@@ -34,7 +33,7 @@ from proxystore.store.utils import get_key
 
 from fff.learning.gc.ase import SchnetCalculator
 from fff.learning.gc.functions import GCSchNetForcefield
-from fff.learning.gc.models import SchNet, load_pretrained_model
+from fff.learning.gc.models import SchNet
 from fff.learning.util.messages import TorchMessage
 from fff.sampling.md import MolecularDynamics
 from fff.sampling.mhm import MHMSampler
@@ -254,7 +253,7 @@ class Thinker(BaseThinker):
 
         # Remove the unrealistic structures
         if self.max_force is not None:
-            all_examples = [a for a in all_examples if np.abs(a.get_forces()).max() < self.max_force]
+            all_examples = [a for a in all_examples if np.linalg.norm(a.get_forces(), axis=-1).max() < self.max_force]
             self.logger.info(f'Reduced the number of training examples to {len(all_examples)} with forces less than {self.max_force:.2f} eV/A.')
 
         # Sample the training sets and proxy them
@@ -757,7 +756,7 @@ class Thinker(BaseThinker):
             self.audit_results.append(10 / traj.last_run_length)  # 10 eV/atom is much larger than our typical error
 
         # Write output to disk regardless of whether we were successful
-        #_get_proxy_stats(proxy, result)
+        _get_proxy_stats(proxy, result)
         with open(self.out_dir / 'simulation-results.json', 'a') as fp:
             print(result.json(exclude={'value', 'inputs'}), file=fp)
 
@@ -818,7 +817,6 @@ if __name__ == '__main__':
     group.add_argument("--dynamics-temp", type=float, default=100,
                        help="Initial temperature for molecular dynamics run. Only applicable to MD sampling")
 
-
     # Parameters related to active learning
     group = parser.add_argument_group(title='Scheduling', description='Settings related to how we schedule active learning tasks')
     group.add_argument('--infer-chunk-size', type=int, default=100,
@@ -829,7 +827,6 @@ if __name__ == '__main__':
                        help='Target number of audit tasks to have waiting to be run.')
     group.add_argument('--queue-tolerance', type=float, default=0.2,
                        help='Fraction audit queue can vary before we reallocate resources.')
-    
 
     # Parameters related to ProxyStore
     known_ps = [None, 'redis', 'file', 'globus']
@@ -942,6 +939,7 @@ if __name__ == '__main__':
                          proxystore_name=ps_names,
                          proxystore_threshold=args.ps_threshold)
 
+
     # Apply wrappers to functions that will be used to fix certain requirements
     def _wrap(func, **kwargs):
         out = partial(func, **kwargs)
@@ -978,18 +976,17 @@ if __name__ == '__main__':
     if args.parsl:
         import config as parsl_configs
         from colmena.task_server import ParslTaskServer
-        
+
         # Make the config by looking it up from the frame
         config = getattr(parsl_configs, args.parsl_site)(str(out_dir))
-            
+
         if args.parsl_site == "local":
             methods = [my_train_schnet, my_eval_schnet, my_run_dynamics, my_run_simulation]
         else:
             # Assign tasks to the appropriate executor
             methods = [(f, {'executors': ['gpu']}) for f in [my_train_schnet, my_eval_schnet]]
             methods.extend([(f, {'executors': ['cpu']}) for f in [my_run_simulation, my_run_dynamics]])
-            
-        
+
         # Create the server
         doer = ParslTaskServer(methods, queues, config)
     else:
