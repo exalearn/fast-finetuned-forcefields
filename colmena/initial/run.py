@@ -256,7 +256,7 @@ class Thinker(BaseThinker):
             all_examples = [a for a in all_examples if np.linalg.norm(a.get_forces(), axis=-1).max() < self.max_force]
             self.logger.info(f'Reduced the number of training examples to {len(all_examples)} with forces less than {self.max_force:.2f} eV/A.')
 
-        # Sample the training sets and proxy them
+        # Sample the training sets
         train_sets = []
         valid_sets = []
         n_train = int(len(all_examples) * 0.9)
@@ -265,10 +265,13 @@ class Thinker(BaseThinker):
             train_sets.append(all_examples[:n_train])
             valid_sets.append(all_examples[n_train:])
 
+        # Create the proxies of the training and validation data
+        data_proxies = None
         if 'train' in self.ps_names:
             store = ps.store.get_store(self.ps_names['train'])  # TODO (wardlt): Store stores not names?
             train_sets = store.proxy_batch(train_sets)
             valid_sets = store.proxy_batch(valid_sets)
+            data_keys = [get_key(x) for x in train_sets + valid_sets]
 
         # Send off the models to be trained
         for i, train_set in enumerate(train_sets):
@@ -279,7 +282,12 @@ class Thinker(BaseThinker):
                 valid_sets[i],
                 method='train',
                 topic='train',
-                task_info={'model_id': i, 'training_round': self.training_round, 'train_size': len(all_examples)}
+                task_info={
+                    'model_id': i,
+                    'training_round': self.training_round,
+                    'train_size': len(all_examples),
+                    'data_keys': data_proxies
+                }
             )
             self.training_incomplete += 1
         self.logger.info('TIMING - Finish train_models')
@@ -317,10 +325,11 @@ class Thinker(BaseThinker):
                 # Signals that inference can start now that we've saved one model
                 self.sampling_ready.set()
 
+            # Update the proxies used for inference
             if 'train' in self.ps_names:
                 # Evict the previous inference model
                 inf_store = ps.store.get_store(self.ps_names['train'])
-                prev_model = self.inference_proxies[model_id]
+                # prev_model = self.inference_proxies[model_id]  # TODO (wardlt): Monitor then evict previous model when all done
 
                 # Store the next model
                 self.inference_proxies[model_id] = inf_store.proxy(model_msg)
@@ -334,22 +343,32 @@ class Thinker(BaseThinker):
                     self.inference_ready.set()
                     self.logger.info('Inference is now eligible to start')
 
+        # Access the proxy timing information of the result
+        _get_proxy_stats(proxy, result)
+
+        # Stop if the model training failed
+        assert result.success, result.failure_info.exception
+
         # Check whether training is complete
         self.training_incomplete -= 1
         if self.training_incomplete == 0:
             self.logger.info('All models are trained. Marking that training is complete')
             self.submit_inference()  # Command inference to start first
             self.training_complete.set()
+
+            # Evict the training data
+            if 'train' in self.ps_names:
+                data_keys = result.task_info['data_keys']
+                train_store = ps.store.get_store(self.ps_names['train'])
+                for key in data_keys:
+                    train_store.evict(key)
+                self.logger.info('Evicted the training data from the proxy store')
         else:
             self.logger.info(f'{self.training_incomplete} models left to train')
 
-        # Save the result to disk
-        _get_proxy_stats(proxy, result)
+        # Save the task information to disk
         with open(self.out_dir / 'training-results.json', 'a') as fp:
             print(result.json(exclude={'inputs', 'value'}), file=fp)
-
-        # Stop if the model training failed
-        assert result.success, result.failure_info.exception
 
         self.logger.info('TIMING - End store_models')
 
