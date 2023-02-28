@@ -30,3 +30,17 @@ def test_pickle(model):
     model_copy = model_msg_copy.get_model()
     x = torch.Tensor([0, 1, 2, 4])
     assert np.isclose(model(x).detach(), model_copy(x).detach()).all()
+
+
+def test_repickle(model):
+    """Make sure I can re-pickle a model without first resolving it"""
+
+    # Create a model_msg and then copy it twice
+    model_msg = TorchMessage(model)
+    model_msg_copy: TorchMessage = pkl.loads(pkl.dumps(model_msg))
+    model_msg_copy: TorchMessage = pkl.loads(pkl.dumps(model_msg_copy))
+
+    # Ensure that the new model yields the same result as the original
+    model_copy = model_msg_copy.get_model()
+    x = torch.Tensor([0, 1, 2, 4])
+    assert np.isclose(model(x).detach(), model_copy(x).detach()).all()
