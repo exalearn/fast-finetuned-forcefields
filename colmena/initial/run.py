@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from random import shuffle, sample
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, NamedTuple
 from dataclasses import asdict
 import hashlib
 import logging
@@ -218,6 +218,7 @@ class Thinker(BaseThinker):
         # Coordination between threads
         #  Communication from the training tasks
         self.training_incomplete = 0  # Number of training tasks that are incomplete
+        self.train_data_keys: list[NamedTuple] = []  # Stores the keys of the proxies associated with training data
         self.start_training = Event()  # Starts training on the latest data
         self.training_complete = Event()
         self.active_updated = False  # Whether the active model has already been updated for this batch
@@ -266,12 +267,11 @@ class Thinker(BaseThinker):
             valid_sets.append(all_examples[n_train:])
 
         # Create the proxies of the training and validation data
-        data_proxies = None
         if 'train' in self.ps_names:
             store = ps.store.get_store(self.ps_names['train'])  # TODO (wardlt): Store stores not names?
             train_sets = store.proxy_batch(train_sets)
             valid_sets = store.proxy_batch(valid_sets)
-            data_keys = [get_key(x) for x in train_sets + valid_sets]
+            self.train_data_keys = [get_key(x) for x in train_sets + valid_sets]
 
         # Send off the models to be trained
         for i, train_set in enumerate(train_sets):
@@ -285,8 +285,7 @@ class Thinker(BaseThinker):
                 task_info={
                     'model_id': i,
                     'training_round': self.training_round,
-                    'train_size': len(all_examples),
-                    'data_keys': data_proxies
+                    'train_size': len(all_examples)
                 }
             )
             self.training_incomplete += 1
@@ -358,9 +357,8 @@ class Thinker(BaseThinker):
 
             # Evict the training data
             if 'train' in self.ps_names:
-                data_keys = result.task_info['data_keys']
                 train_store = ps.store.get_store(self.ps_names['train'])
-                for key in data_keys:
+                for key in self.train_data_keys:
                     train_store.evict(key)
                 self.logger.info('Evicted the training data from the proxy store')
         else:
@@ -389,7 +387,7 @@ class Thinker(BaseThinker):
         if len(self.audit_results) > self.n_qc_workers:
             # Predict run length given audit error
             error_per_step = np.median(self.audit_results)
-            target_error = self.energy_tolerance * 2
+            target_error = self.energy_tolerance
             estimated_run_length = int(target_error / error_per_step)
             self.logger.info(f'Estimated run length of {estimated_run_length} steps to have an error of {target_error:.3f} eV/atom')
             self.run_length = max(self.min_run_length, min(self.max_run_length, estimated_run_length))  # Keep to within the user-defined bounds
@@ -721,7 +719,7 @@ class Thinker(BaseThinker):
             dft_energy = atoms.get_potential_energy()
             result.task_info['dft_energy'] = dft_energy
 
-            # See how things compared to 
+            # See how things compared to
             ml_eng = result.task_info['ml_energy']
             difference = abs(ml_eng - dft_energy) / len(atoms)
             result.task_info['difference'] = difference
