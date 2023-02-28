@@ -55,6 +55,12 @@ def test_changing_energy_scales(test_file_path, ff):
     model = load_pretrained_model(test_file_path / 'example-schnet.pt')
     orig_energy, orig_forces = ff.evaluate(model, [water])
 
+    # Turn off the atomic reference energies
+    model.atom_ref = None
+    new_energy, new_forces = ff.evaluate(model, [water])
+    assert np.isclose(new_energy, orig_energy).all()
+    assert np.isclose(new_forces, orig_forces).all()
+
     # Try changing the mean energy
     model = load_pretrained_model(test_file_path / 'example-schnet.pt', mean=1, std=1)
     new_energy, new_forces = ff.evaluate(model, [water])

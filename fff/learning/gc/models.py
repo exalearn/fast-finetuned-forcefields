@@ -128,6 +128,7 @@ class SchNet(nn.Module):
         self.act = ShiftedSoftplus()
         self.lin2 = nn.Linear(self.num_features // 2, 1)
 
+        # Reference energies for each atom type
         self.atom_ref = nn.Embedding(100, 1, padding_idx=0)
 
         self.reset_parameters()
@@ -224,8 +225,9 @@ class SchNet(nn.Module):
             h = h * self.std + self.mean
 
         # Add atomic reference energies
-        atom_ref = self.atom_ref(data.z.long())
-        h = h + atom_ref
+        if self.atom_ref is not None:
+            atom_ref = self.atom_ref(data.z.long())
+            h = h + atom_ref
 
         mask = (data.z == 0).view(-1, 1)
         h = h.masked_fill(mask.expand_as(h), 0.)
@@ -234,15 +236,3 @@ class SchNet(nn.Module):
         out = scatter_add(h, batch, dim=0, dim_size=self.batch_size).view(-1)
 
         return out
-
-    @staticmethod
-    def loss(input, target):
-        """
-        Calculates the mean squared error
-        This loss assumes that zeros are used as padding on the target so that
-        the count can be derived from the number of non-zero elements.
-        """
-        loss = F.mse_loss(input, target, reduction="sum")
-        N = (target != 0.0).to(loss.dtype).sum()
-        loss = loss / N
-        return loss
