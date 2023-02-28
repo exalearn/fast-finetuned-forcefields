@@ -17,14 +17,17 @@ class TorchMessage:
         self._pickle = None
 
     def __getstate__(self):
+        assert (self.model is None) ^ (self._pickle is None), "We have both a model and its pickled copy. That should never be"
         state = self.__dict__.copy()
-        # Save the model with pickle
-        model_pkl = BytesIO()
-        torch.save(self.model, model_pkl)
 
-        # Store it
-        state['model'] = None
-        state['_pickle'] = model_pkl.getvalue()
+        # Save the model with pickle if it isn't already serialized
+        if self._pickle is None:
+            model_pkl = BytesIO()
+            torch.save(self.model, model_pkl)
+
+            # Store it
+            state['model'] = None
+            state['_pickle'] = model_pkl.getvalue()
         return state
 
     def get_model(self, map_location: Union[str, torch.device] = 'cpu'):

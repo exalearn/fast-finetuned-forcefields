@@ -1,8 +1,6 @@
 from pathlib import Path
 
-from _pytest.fixtures import fixture
 from ase.build import molecule
-
 from ase.db import connect
 from pytest import fixture
 
