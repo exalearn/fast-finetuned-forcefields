@@ -90,11 +90,12 @@ def theta_debug_and_venti(log_dir: str) -> Config:
                 max_workers=1,
                 address=address_by_hostname(),
                 provider=CobaltProvider(
-                    queue='debug-flat-quad',  # Flat has lower utilization, even though xTB is (slightly) faster on cache
+                    queue='debug-cache-quad',  # Flat has lower utilization, even though xTB is (slightly) faster on cache
                     account='CSC249ADCD08',
                     launcher=AprunLauncher(overrides="-d 256 --cc depth -j 4"),
                     worker_init='''
 module load miniconda-3
+module swap PrgEnv-intel PrgEnv-gnu
 source activate /lus/theta-fs0/projects/CSC249ADCD08/fast-finedtuned-forcefields/env-cpu
 which python
 ''',  # Active the environment
@@ -103,7 +104,7 @@ which python
                     min_blocks=0,
                     max_blocks=1,
                     cmd_timeout=300,
-                    walltime='03:00:00',
+                    walltime='1:00:00',
                     scheduler_options='#COBALT --attrs enable_ssh=1:filesystems=theta-fs0,home',
             )),
             HighThroughputExecutor(
