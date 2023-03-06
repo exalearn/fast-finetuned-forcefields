@@ -179,6 +179,7 @@ class Thinker(BaseThinker):
         self.max_force = max_force
 
         # Load in the search space
+        self.search_space_lock: Lock = Lock()
         with connect(search_path) as db:
             self.search_space = [Trajectory(i, x.toatoms(), name=x.get('filename', f'traj-{i}')) for i, x in enumerate(db.select(''))]
             shuffle(self.search_space)
@@ -377,7 +378,8 @@ class Thinker(BaseThinker):
         self.sampling_ready.wait()
 
         # Pick the next eligible trajectory and start from the last validated structure
-        trajectory = self.search_space.popleft()
+        with self.search_space_lock:
+            trajectory = self.search_space.popleft()
         starting_point = trajectory.starting
 
         # Add the structure to a list of those being validated
@@ -465,7 +467,8 @@ class Thinker(BaseThinker):
         else:
             # If not, push it to the back of the queue
             traj = self.to_audit.pop(traj_id)
-            self.search_space.append(traj)
+            with self.search_space_lock:
+                self.search_space.append(traj)
 
         # Save the result to disk
         _get_proxy_stats(proxy, result)
@@ -736,7 +739,8 @@ class Thinker(BaseThinker):
                 self.audit_results.append(difference / traj.last_run_length)
 
                 # Add the trajectory back to the list to sample from
-                self.search_space.append(traj)  # Put it to the back of the list
+                with self.search_space_lock:
+                    self.search_space.append(traj)  # Put it to the back of the list
             else:
                 # Just print the performance
                 self.logger.info(f'Difference between ML and DFT: {difference:.3f} eV/atom')
@@ -747,7 +751,8 @@ class Thinker(BaseThinker):
                 if traj_id in self.to_audit:
                     traj = self.to_audit[traj_id]
                 else:
-                    traj = next(x for x in self.search_space if x.id == traj_id)
+                    with self.search_space_lock:
+                        traj = next(x for x in self.search_space if x.id == traj_id)
                 with connect(self.db_path) as db:
                     db.write(atoms, runtime=result.time_running, source=task_type, filename=traj.name)
             else:
@@ -767,7 +772,8 @@ class Thinker(BaseThinker):
             traj.set_validation(False)
 
             # Also add it back to the search space
-            self.search_space.append(traj)
+            with self.search_space_lock:
+                self.search_space.append(traj)
 
             # Add a large error value to the queue
             self.audit_results.append(10 / traj.last_run_length)  # 10 eV/atom is much larger than our typical error
@@ -1058,3 +1064,7 @@ if __name__ == '__main__':
         if ps_backend is not None:
             ps.store.get_store(ps_backend).close()
     logging.info('ProxyStores cleaned. Exiting now')
+
+    # Mark that everything completed correctly
+    with open(out_dir / 'done', 'w') as fp:
+        print('done', file=fp)
