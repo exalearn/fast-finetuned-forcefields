@@ -1,5 +1,6 @@
 # Fast Finetuned Forcefields
 [![CI](https://github.com/exalearn/fast-finetuned-forcefields/actions/workflows/python-app.yml/badge.svg)](https://github.com/exalearn/fast-finetuned-forcefields/actions/workflows/python-app.yml)
+[![Coverage Status](https://coveralls.io/repos/github/exalearn/fast-finetuned-forcefields/badge.svg?branch=main)](https://coveralls.io/github/exalearn/fast-finetuned-forcefields?branch=main)
 
 Toolkit for rapidly assembling forcefields on HPC
 

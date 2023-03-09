@@ -46,11 +46,40 @@ def test_run(model, ff, tmp_path):
     assert forces[0].shape == (3, 3)
     assert len(forces)
 
+
+def test_changing_energy_scales(test_file_path, ff):
+    """Ensure that changing atomrefs and energy scales have the desired effect on model performance"""
+    water = build.molecule('H2O')
+
+    # Get the forces and energy without alternation
+    model = load_pretrained_model(test_file_path / 'example-schnet.pt')
+    orig_energy, orig_forces = ff.evaluate(model, [water])
+
+    # Turn off the atomic reference energies
+    model.atom_ref = None
+    new_energy, new_forces = ff.evaluate(model, [water])
+    assert np.isclose(new_energy, orig_energy).all()
+    assert np.isclose(new_forces, orig_forces).all()
+
+    # Try changing the mean energy
+    model = load_pretrained_model(test_file_path / 'example-schnet.pt', mean=1, std=1)
+    new_energy, new_forces = ff.evaluate(model, [water])
+    assert np.isclose(new_energy, np.add(orig_energy, 3), atol=1e-3).all()
+    assert np.isclose(new_forces, orig_forces).all()
+
+    # Try changing the standard deviation
+    model = load_pretrained_model(test_file_path / 'example-schnet.pt', mean=0, std=2)
+    new_energy, new_forces = ff.evaluate(model, [water])
+    assert np.isclose(new_energy, np.multiply(orig_energy, 2), atol=1e-2).all()
+    assert np.isclose(new_forces, np.multiply(orig_forces, 2)).all()
+
     # Change the atomref for H
+    model = load_pretrained_model(test_file_path / 'example-schnet.pt')
     with torch.no_grad():
         model.atom_ref.weight[1] = -1
-    new_energies, _ = ff.evaluate(model, [water] * 4)
-    assert np.isclose(np.subtract(new_energies, energies), -2).all()
+    new_energy, new_forces = ff.evaluate(model, [water])
+    assert np.isclose(np.subtract(new_energy, orig_energy), -2).all()
+    assert np.isclose(new_forces, orig_forces).all()
 
 
 def test_train(model, example_waters, ff):
