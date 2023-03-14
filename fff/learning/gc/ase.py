@@ -1,6 +1,5 @@
 """ASE interface to the model"""
 from io import BytesIO
-from typing import Optional
 
 import torch
 from ase.calculators.calculator import Calculator, all_changes
@@ -18,12 +17,14 @@ class SchnetCalculator(Calculator):
     """
 
     implemented_properties = ['forces', 'energy']
+    default_parameters = {'device': 'cpu'}
     nolabel = True
 
-    def __init__(self, model: SchNet, device: Optional[str] = None, **kwargs):
+    def __init__(self, model: SchNet, device: str = 'cpu', **kwargs):
         Calculator.__init__(self, **kwargs)
         self.net = model
-        self.device = device
+        self.parameters['device'] = device
+        self.net.to(device)
 
     def __getstate__(self):
         # Remove the model from the serialization dictionary
@@ -40,12 +41,17 @@ class SchnetCalculator(Calculator):
         # Load it back in
         fp = BytesIO(state.pop('_net'))
         state['net'] = torch.load(fp, map_location='cpu')
+        state['net'].to(state['parameters']['device'])
         self.__dict__ = state
 
     def to(self, device: str):
         """Move the model to a certain device"""
+        self.parameters['device'] = device
         self.net.to(device)
-        self.device = device
+
+    @property
+    def device(self):
+        return self.parameters['device']
 
     def calculate(
             self, atoms=None, properties=None, system_changes=all_changes,
@@ -63,9 +69,7 @@ class SchnetCalculator(Calculator):
         data.batch = torch.zeros((len(atoms)))  # Fake a single-item batch
 
         # Run the "batch"
-        if self.device is not None:
-            data.to(self.device)
-            self.net.to(self.device)
+        data.to(self.device)
         energy, gradients = eval_batch(self.net, data)
         self.results['energy'] = energy.item()
         self.results['forces'] = gradients.cpu().detach().numpy().squeeze()
