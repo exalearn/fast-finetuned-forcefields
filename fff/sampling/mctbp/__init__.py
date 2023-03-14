@@ -157,6 +157,7 @@ def optimize_structure(atoms: ase.Atoms, calc: Calculator, scratch_dir: Path | N
         atoms: Initial Structure
         fmax: Convergence threshold
         calc: Calculator used to compute energy and forces
+        scratch_dir: Directory in which to store log files
         max_steps: Number of steps for each
         mult: Factor by which to increase convergence threshold id optimization fails
     Returns:
