@@ -47,6 +47,12 @@ def test_mctbp(cluster):
     assert isinstance(min_atoms, ase.Atoms)
     assert len(traj_atoms) > 4
 
+    # Test only returning the minima
+    mctbp.return_minima_only = True
+    _, traj_atoms = mctbp.run_sampling(cluster, 8, calc)
+    assert len(traj_atoms) == 9  # An initial relax plus 8 more
+    assert all(np.max(a.get_forces()) < 0.02 for a in traj_atoms)
+
 
 def test_mhm(cluster, tmpdir):
     calc = TTMCalculator()

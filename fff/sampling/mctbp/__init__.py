@@ -32,6 +32,7 @@ class MCTBP(CalculatorBasedSampler):
                  use_eff_temp: bool = True,
                  use_dsi: bool = True,
                  return_incomplete: bool = True,
+                 return_minima_only: bool = False,
                  scratch_dir: Path | None = None):
         """
 
@@ -43,6 +44,7 @@ class MCTBP(CalculatorBasedSampler):
             use_eff_temp: Whether to adjust the temperature during
             use_dsi: Use dissimilarity index to judge structures
             return_incomplete: Whether to return structures even if part of the sampling procedure fails
+            return_minima_only: Whether to only return minima produced at each step
             scratch_dir: Location in which to store temporary files
         """
         super().__init__(scratch_dir=scratch_dir)
@@ -52,6 +54,7 @@ class MCTBP(CalculatorBasedSampler):
         self.temp = temp
         self.use_eff_temp = use_eff_temp
         self.return_incomplete = return_incomplete
+        self.return_minima_only = return_minima_only
         self.use_dsi = use_dsi
 
     def _run_sampling(self, atoms: ase.Atoms, steps: int, calc: Calculator, **kwargs) -> (ase.Atoms, list[ase.Atoms]):
@@ -93,7 +96,10 @@ class MCTBP(CalculatorBasedSampler):
 
         # Start by optimizing the structure
         opt_cluster, sampled_structures = optimize_structure(atoms, calc, self.scratch_dir, fmax=self.fmax)
-        all_sampled.extend(sampled_structures)
+        if self.return_minima_only:
+            all_sampled.append(opt_cluster)
+        else:
+            all_sampled.extend(sampled_structures + [opt_cluster])
         energy_list.append(opt_cluster.get_potential_energy())  # Pulls a cached result
         curr_e = opt_cluster.get_potential_energy()
 
@@ -112,7 +118,10 @@ class MCTBP(CalculatorBasedSampler):
 
             # Find the nearest local minimum
             opt_new_cluster, sampled_structures = optimize_structure(atoms, calc, self.scratch_dir, fmax=self.fmax)
-            all_sampled.extend(sampled_structures)
+            if self.return_minima_only:
+                all_sampled.append(opt_new_cluster)
+            else:
+                all_sampled.extend(sampled_structures + [opt_new_cluster])
             new_e = opt_new_cluster.get_potential_energy()
             energy_list.append(new_e)
 
