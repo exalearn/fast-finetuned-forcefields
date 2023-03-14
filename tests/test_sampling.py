@@ -64,4 +64,11 @@ def test_mhm(cluster, tmpdir):
     assert any(a.info['mhm-source'].startswith('md') for a in traj_atoms)
     assert any(a.info['mhm-source'].startswith('qn') for a in traj_atoms)
 
-    assert len(list(Path(tmpdir).glob("*"))) == 0
+    assert len(list(Path(tmpdir).glob("*"))) == 0, 'Did not clean up after self'
+
+    # Try with returning minima only
+    mhm.return_minima_only = True
+    _, traj_atoms, = mhm.run_sampling(cluster, 4, calc)
+
+    assert len(traj_atoms) <= 4  # Cannot find more than 4 unique minima
+    assert all(np.max(a.get_forces()) < 0.02 for a in traj_atoms)
