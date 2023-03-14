@@ -70,8 +70,16 @@ class MCTBP(CalculatorBasedSampler):
         """
 
         success, error_msg, last_strc, traj = self.perform_mctbp(atoms, steps, calc, **kwargs)
+
+        # Raise an exception if we do not allow incomplete runs
         if not (success or self.return_incomplete):
             raise ValueError(error_msg)
+
+        # Ensure the output structure always has energies and forces
+        if last_strc.calc is None:
+            last_strc.calc = calc
+            last_strc.get_forces()
+
         return last_strc, traj
 
     def perform_mctbp(self, atoms: ase.Atoms, steps: int, calc: Calculator, random_seed: int | None = None) \
