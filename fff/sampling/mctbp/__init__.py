@@ -104,9 +104,10 @@ class MCTBP(CalculatorBasedSampler):
         curr_e = opt_cluster.get_potential_energy()
 
         # Loop over a set number of optimization steps
+        new_cluster = opt_cluster.copy()  # Start with a copy of this initial structure
         for i in range(steps):
-            # Create a copy of the new structure at each iteration
-            new_cluster = opt_cluster.copy()
+            # Start with a fresh copy of the initial cluster
+            new_cluster = new_cluster.copy()
 
             # Perturb structure
             accept = False
@@ -142,6 +143,7 @@ class MCTBP(CalculatorBasedSampler):
             if accept_move:
                 accept_structure = check_optimized_structure(opt_new_cluster.get_positions())
                 if accept_structure:
+                    print('accepted!')
                     new_cluster = opt_new_cluster
                     curr_e = new_e
 
