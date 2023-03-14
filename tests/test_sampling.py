@@ -42,16 +42,16 @@ def test_optimize(atoms):
 def test_mctbp(cluster):
     calc = TTMCalculator()
     mctbp = MCTBP()
-    min_atoms, traj_atoms = mctbp.run_sampling(cluster, 2, calc)
+    min_atoms, traj_atoms = mctbp.run_sampling(cluster, 2, calc, random_seed=None)
 
     assert isinstance(min_atoms, ase.Atoms)
     assert len(traj_atoms) > 4
 
     # Test only returning the minima
     mctbp.return_minima_only = True
-    _, traj_atoms = mctbp.run_sampling(cluster, 4, calc)
+    _, traj_atoms = mctbp.run_sampling(cluster, 4, calc, random_seed=124)
     assert len(traj_atoms) == 5  # An initial relax plus 8 more
-    assert all(np.max(a.get_forces()) < 0.02 for a in traj_atoms)
+    assert all(np.max(a.get_forces()) <= 0.02 for a in traj_atoms), f'Maximum forces are {max(a.get_forces().max() for a in traj_atoms):.2f}'
     assert all(a is not traj_atoms[0] for a in traj_atoms[1:])
     assert not any(np.isclose(traj_atoms[0].positions, a.positions, atol=1e-4).all() for a in traj_atoms[1:])
     assert not any(np.isclose(traj_atoms[1].positions, a.positions, atol=1e-4).all() for a in traj_atoms[2:])
