@@ -104,8 +104,11 @@ class MCTBP(CalculatorBasedSampler):
         curr_e = opt_cluster.get_potential_energy()
 
         # Loop over a set number of optimization steps
-        new_cluster = opt_cluster.copy()
         for i in range(steps):
+            # Create a copy of the new structure at each iteration
+            new_cluster = opt_cluster.copy()
+
+            # Perturb structure
             accept = False
             for _ in range(100000):
                 mc_cluster, move_type = get_move(new_cluster.get_positions(), self.max_disp, len(atoms) // 3)
@@ -116,8 +119,8 @@ class MCTBP(CalculatorBasedSampler):
             if not accept:  # TODO (wardlt): Implement a scheme that uses exceptions
                 return False, 'Did not find an acceptable move', new_cluster, all_sampled
 
-            # Find the nearest local minimum
-            opt_new_cluster, sampled_structures = optimize_structure(atoms, calc, self.scratch_dir, fmax=self.fmax)
+            # Find the nearest local minimum to this new cluster
+            opt_new_cluster, sampled_structures = optimize_structure(new_cluster, calc, self.scratch_dir, fmax=self.fmax)
             if self.return_minima_only:
                 all_sampled.append(opt_new_cluster)
             else:
