@@ -19,6 +19,17 @@ _disallowed_kwargs = ['minima_traj']
 class MHMSampler(CalculatorBasedSampler):
     """Run minima hopping and return all minima"""
 
+    def __init__(self, return_minima_only: bool = False,
+                 scratch_dir: Path | None = None):
+        """
+
+        Args:
+            return_minima_only: Whether to only return minima produced at each step
+            scratch_dir: Location in which to store temporary files
+        """
+        super().__init__(scratch_dir=scratch_dir)
+        self.return_minima_only = return_minima_only
+
     def _run_sampling(self, atoms: ase.Atoms, steps: int, calc: Calculator, **kwargs) -> (ase.Atoms, list[ase.Atoms]):
         # Store where we started
         old_path = Path.cwd()
@@ -60,6 +71,6 @@ class MHMSampler(CalculatorBasedSampler):
                             new_steps.append(a)
                         all_steps.extend(new_steps[1:-1])  # Not the first or last
 
-                return minima[-1], minima[1:-1] + all_steps
+                return minima[-1], minima[1:-1] + ([] if self.return_minima_only else all_steps)
             finally:
                 os.chdir(old_path)  # Go back to where we started
