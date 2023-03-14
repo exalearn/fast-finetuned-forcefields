@@ -74,13 +74,15 @@ class MCTBP(CalculatorBasedSampler):
             raise ValueError(error_msg)
         return last_strc, traj
 
-    def perform_mctbp(self, atoms: ase.Atoms, steps: int, calc: Calculator, **kwargs) -> (bool, str, ase.Atoms, list[ase.Atoms]):
+    def perform_mctbp(self, atoms: ase.Atoms, steps: int, calc: Calculator, random_seed: int | None = None) \
+            -> (bool, str, ase.Atoms, list[ase.Atoms]):
         """Run an MC-TBP simulation
 
         Args:
             atoms: Starting water cluster geometry
             calc: Calculator used for computing energy and forces
             steps: number of MC moves to make
+            random_seed: Random seed used for the run
         Returns:
             - Whether the run completed successfully
             - Reason the run did not complete, if
@@ -89,6 +91,7 @@ class MCTBP(CalculatorBasedSampler):
         """
 
         eff_temp = None
+        rng = np.random.RandomState(random_seed)
 
         # Initialize tracking arrays
         all_sampled = []  # all structures that were sampled
@@ -112,7 +115,7 @@ class MCTBP(CalculatorBasedSampler):
             # Perturb structure
             accept = False
             for _ in range(100000):
-                mc_cluster, move_type = get_move(new_cluster.get_positions(), self.max_disp, len(atoms) // 3)
+                mc_cluster, move_type = get_move(new_cluster.get_positions(), self.max_disp, len(atoms) // 3, rng=rng)
                 accept = check_atom_overlap(mc_cluster, min_tol=self.min_tol)
                 if accept:
                     break
@@ -134,7 +137,8 @@ class MCTBP(CalculatorBasedSampler):
                 accept_move = move_acceptance(curr_e, new_e,
                                               new_cluster.get_positions(), opt_new_cluster.get_positions(),
                                               self.temp if eff_temp is None else eff_temp,
-                                              use_dsi=self.use_dsi)
+                                              use_dsi=self.use_dsi,
+                                              rng=rng)
                 bin_count = get_histogram_count(energy_list)
                 eff_temp = calc_eff_temp(self.temp, bin_count)
             else:
@@ -190,41 +194,49 @@ def optimize_structure(atoms: ase.Atoms, calc: Calculator, scratch_dir: Path | N
         return atoms, traj_atoms
 
 
-def get_move(new_cluster, max_disp, num_waters):
-    """
-    For each molecule, either:
+def get_move(new_cluster, max_disp, num_waters, rng: np.random.RandomState):
+    """For each molecule, either:
     1. Translate in x-, y-, z-coords
     2. Rotate about H-O-H bisector
     3. Rotate about O-H bond
     4. Rotate about O-O axis (with any other molecule)
+
+    Args:
+        new_cluster: Cluster to be perturbed
+        max_disp: Maximum displacements
+        num_waters: Number of waters in the cluster
+        rng: Random number generator
+    Returns:
+        - Updated positions of each water
+        - Type of move
     """
-    move_type = np.random.randint(0, 4)
+    move_type = rng.randint(0, 4)
     if move_type == 0:  # Translate single molecule by (x,y,z)
-        num_trans = np.random.randint(1, int(num_waters / 3))
-        ind_trans = np.random.randint(0, num_waters, size=num_trans)
+        num_trans = rng.randint(1, int(num_waters / 3))
+        ind_trans = rng.randint(0, num_waters, size=num_trans)
         for i in range(len(ind_trans)):
             rand_molecule = ind_trans[i]
-            x_val = np.random.uniform(0, max_disp)
-            y_val = np.random.uniform(0, max_disp)
-            z_val = np.random.uniform(0, max_disp)
+            x_val = rng.uniform(0, max_disp)
+            y_val = rng.uniform(0, max_disp)
+            z_val = rng.uniform(0, max_disp)
             new_cluster[rand_molecule * 3:rand_molecule * 3 + 3, :] += np.array([x_val, y_val, z_val])
     elif move_type == 1:  # rotate about H-O-H bisector
-        num_rots = np.random.randint(1, int(num_waters) / 3)
-        ind_rots = np.random.randint(0, num_waters, size=num_rots)
+        num_rots = rng.randint(1, int(num_waters) / 3)
+        ind_rots = rng.randint(0, num_waters, size=num_rots)
         for i in range(len(ind_rots)):
             mol_rot = ind_rots[i]
-            theta_val = np.random.uniform(0, 2 * np.pi)
+            theta_val = rng.uniform(0, 2 * np.pi)
             new_cluster[mol_rot * 3:(mol_rot * 3 + 3), :] = mcm.rotate_around_HOH_bisector_axis(new_cluster[mol_rot * 3:(mol_rot * 3 + 3), :], theta_val)
         pass
     elif move_type == 2:  # rotate about O-H bond
-        ind_rot = np.random.randint(0, num_waters)  # choose molecule to rotate
-        theta_val = np.random.uniform(0, 2 * np.pi)
+        ind_rot = rng.randint(0, num_waters)  # choose molecule to rotate
+        theta_val = rng.uniform(0, 2 * np.pi)
         monomer_geom = new_cluster[ind_rot * 3:ind_rot * 3 + 3, :]
-        which_h = np.random.randint(0, 2)  # choose which hydrogen
+        which_h = rng.randint(0, 2)  # choose which hydrogen
         new_cluster[ind_rot * 3:ind_rot * 3 + 3, :] = mcm.rotate_around_local_axis(monomer_geom, 0, which_h + 1, theta_val)
     else:  # rotate about O-O axis
-        ind_rots = np.random.randint(0, num_waters, size=2)  # choose two oxygens to rotate about
-        theta_val = np.random.uniform(0, 2 * np.pi)
+        ind_rots = rng.randint(0, num_waters, size=2)  # choose two oxygens to rotate about
+        theta_val = rng.uniform(0, 2 * np.pi)
         dimer_geom = np.concatenate((new_cluster[ind_rots[0] * 3:(ind_rots[0] * 3 + 3), :], new_cluster[ind_rots[1] * 3:(ind_rots[1] * 3 + 3), :]), axis=0)
         rotate_dimer = mcm.rotate_around_local_axis(dimer_geom, 0, 3, theta_val)
         new_cluster[ind_rots[0] * 3:(ind_rots[0] * 3 + 3), :] = rotate_dimer[0:3, :]
@@ -286,7 +298,8 @@ def check_atom_overlap(new_config, min_tol=1.0):
     return accept
 
 
-def move_acceptance(prev_e, curr_e, prev_struct=None, curr_struct=None, temp=0.8, use_dsi=True, dsi_threshold=0.5, norm_const=0.5):
+def move_acceptance(prev_e, curr_e, prev_struct=None, curr_struct=None, temp=0.8, use_dsi=True,
+                    dsi_threshold=0.5, norm_const=0.5, rng: np.random.RandomState = None):
     """
     Calculates whether a move was accepted based on the change in energy and the temp
     args: energy before move (float), energy after move (float), structures (np.array), temperature (float)
@@ -301,14 +314,14 @@ def move_acceptance(prev_e, curr_e, prev_struct=None, curr_struct=None, temp=0.8
                 accept = False
             else:
                 coeff = math.exp(min(1, -(curr_e - prev_e - norm_const * dsi) / temp))  # missing k_b
-                rand_num = np.random.uniform(0, 1)
+                rand_num = rng.uniform(0, 1)
                 if rand_num <= coeff:
                     accept = True
                 else:
                     accept = False
         else:
             coeff = math.exp(min(1, -(curr_e - prev_e) / temp))  # missing k_b
-            rand_num = np.random.uniform(0, 1)
+            rand_num = rng.uniform(0, 1)
             if rand_num <= coeff:
                 accept = True
             else:
