@@ -92,6 +92,7 @@ def test_ase(model, example_waters):
     atoms: ase.Atoms = example_waters[0]
 
     calc = SchnetCalculator(model)
+    assert calc.device == 'cpu'
     atoms.set_calculator(calc)
     forces = calc.get_forces(atoms)
     numerical_forces = calc.calculate_numerical_forces(atoms, d=1e-4)
