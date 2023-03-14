@@ -53,6 +53,8 @@ def test_mctbp(cluster):
     assert len(traj_atoms) == 5  # An initial relax plus 8 more
     assert all(np.max(a.get_forces()) < 0.02 for a in traj_atoms)
     assert all(a is not traj_atoms[0] for a in traj_atoms[1:])
+    assert not any(np.isclose(traj_atoms[0].positions, a.positions, atol=1e-4).all() for a in traj_atoms[1:])
+    assert not any(np.isclose(traj_atoms[1].positions, a.positions, atol=1e-4).all() for a in traj_atoms[2:])
 
 
 def test_mhm(cluster, tmpdir):
