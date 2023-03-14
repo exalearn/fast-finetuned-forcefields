@@ -33,6 +33,7 @@ class MCTBP(CalculatorBasedSampler):
                  use_dsi: bool = True,
                  return_incomplete: bool = True,
                  return_minima_only: bool = False,
+                 guesses_before_failure: int = 10000,
                  scratch_dir: Path | None = None):
         """
 
@@ -45,6 +46,7 @@ class MCTBP(CalculatorBasedSampler):
             use_dsi: Use dissimilarity index to judge structures
             return_incomplete: Whether to return structures even if part of the sampling procedure fails
             return_minima_only: Whether to only return minima produced at each step
+            guesses_before_failure: Number of attempts to find a new move before giving up
             scratch_dir: Location in which to store temporary files
         """
         super().__init__(scratch_dir=scratch_dir)
@@ -56,6 +58,7 @@ class MCTBP(CalculatorBasedSampler):
         self.return_incomplete = return_incomplete
         self.return_minima_only = return_minima_only
         self.use_dsi = use_dsi
+        self.guesses_before_failure = guesses_before_failure
 
     def _run_sampling(self, atoms: ase.Atoms, steps: int, calc: Calculator, **kwargs) -> (ase.Atoms, list[ase.Atoms]):
         """Run an MC-TBP simulation
@@ -122,16 +125,16 @@ class MCTBP(CalculatorBasedSampler):
 
             # Perturb structure
             accept = False
-            for _ in range(100000):
+            for _ in range(self.guesses_before_failure):
                 mc_cluster, move_type = get_move(new_cluster.get_positions(), self.max_disp, len(atoms) // 3, rng=rng)
                 accept = check_atom_overlap(mc_cluster, min_tol=self.min_tol)
                 if accept:
                     break
-            new_cluster.set_positions(mc_cluster)
             if not accept:  # TODO (wardlt): Implement a scheme that uses exceptions
                 return False, 'Did not find an acceptable move', new_cluster, all_sampled
 
             # Find the nearest local minimum to this new cluster
+            new_cluster.set_positions(mc_cluster)
             opt_new_cluster, sampled_structures = optimize_structure(new_cluster, calc, self.scratch_dir, fmax=self.fmax)
             if self.return_minima_only:
                 all_sampled.append(opt_new_cluster)
