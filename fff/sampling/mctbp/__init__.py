@@ -143,7 +143,6 @@ class MCTBP(CalculatorBasedSampler):
             if accept_move:
                 accept_structure = check_optimized_structure(opt_new_cluster.get_positions())
                 if accept_structure:
-                    print('accepted!')
                     new_cluster = opt_new_cluster
                     curr_e = new_e
 
