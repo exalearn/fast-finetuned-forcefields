@@ -1,7 +1,9 @@
 from pathlib import Path
+from unittest.mock import patch
 
 import ase
 import numpy as np
+from pytest import raises
 from ase.calculators.lj import LennardJones
 from ase.calculators.singlepoint import SinglePointCalculator
 from ttm.ase import TTMCalculator
@@ -55,6 +57,23 @@ def test_mctbp(cluster):
     assert all(a is not traj_atoms[0] for a in traj_atoms[1:])
     assert not any(np.isclose(traj_atoms[0].positions, a.positions, atol=1e-4).all() for a in traj_atoms[1:])
     assert not any(np.isclose(traj_atoms[1].positions, a.positions, atol=1e-4).all() for a in traj_atoms[2:])
+
+
+def test_mctbp_failures(cluster):
+    """Make sure MCTBP can fail gracefully"""
+
+    calc = TTMCalculator()
+    mctbp = MCTBP(return_incomplete=False)
+    mctbp.guesses_before_failure = 10
+
+    # Make sure that no guess will be accepted
+    with patch('fff.sampling.mctbp.check_atom_overlap', return_value=False):
+        with raises(ValueError):
+            mctbp.run_sampling(cluster, 4, calc, random_seed=124)
+
+        mctbp.return_incomplete = True
+        result, _ = mctbp.run_sampling(cluster, 4, calc, random_seed=124)
+        assert result.calc is not None
 
 
 def test_mhm(cluster, tmpdir):
