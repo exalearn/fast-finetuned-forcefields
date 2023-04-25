@@ -37,6 +37,7 @@ from fff.learning.gc.models import SchNet
 from fff.learning.util.messages import TorchMessage
 from fff.sampling.md import MolecularDynamics
 from fff.sampling.mhm import MHMSampler
+from fff.sampling.mctbp import MCTBP
 from fff.simulation import run_calculator
 from fff.simulation.utils import read_from_string, write_to_string
 
@@ -329,9 +330,9 @@ class Thinker(BaseThinker):
             if 'train' in self.ps_names:
                 # Evict the previous inference model
                 inf_store = ps.store.get_store(self.ps_names['train'])
-                # prev_model = self.inference_proxies[model_id]  # TODO (wardlt): Monitor then evict previous model when all done
 
                 # Store the next model
+                str(model_msg)  # Forces proxy to resolve before we proxy it again
                 self.inference_proxies[model_id] = inf_store.proxy(model_msg)
             else:
                 self.inference_proxies[model_id] = model_msg
@@ -389,6 +390,7 @@ class Thinker(BaseThinker):
         if len(self.audit_results) > self.n_qc_workers:
             # Predict run length given audit error
             error_per_step = np.median(self.audit_results)
+            self.logger.info(f'Median error per step: {error_per_step:.2e} eV/atom/step')
             target_error = self.energy_tolerance
             estimated_run_length = int(target_error / error_per_step)
             self.logger.info(f'Estimated run length of {estimated_run_length} steps to have an error of {target_error:.3f} eV/atom')
@@ -422,7 +424,8 @@ class Thinker(BaseThinker):
         # Determine whether we should re-allocate resources
         if len(self.task_queue_audit) > self.queue_length * (1 + self.queue_tolerance) and \
                 self.rec.allocated_slots('sample') > 0 and \
-                not self.reallocating.is_set():
+                not self.reallocating.is_set() and \
+                not self.done.is_set():
             self.reallocating.set()
             self.logger.info('We have enough sampling tasks, reallocating resources to simulation')
             self.rec.reallocate('sample', 'simulate', 1, block=False, callback=self.reallocating.clear)
@@ -455,6 +458,7 @@ class Thinker(BaseThinker):
 
             # Store the trajectory ID as information about the atoms object
             for a in traj:
+                a.calc = None  # Remove the calculator as it's no longer needed
                 a.info['traj_id'] = traj_id
 
             # Extend the current list of candidates
@@ -701,7 +705,8 @@ class Thinker(BaseThinker):
         # Reallocate resources if the task queue is getting too small
         if len(self.task_queue_audit) <= self.queue_length * (1 - self.queue_tolerance) and \
                 self.rec.allocated_slots('simulate') > 0 and \
-                not self.reallocating.is_set():
+                not self.reallocating.is_set() and \
+                not self.done.is_set():
             self.reallocating.set()
             self.logger.info('Running low on simulation tasks. Reallocating to sampling')
             self.rec.reallocate('simulate', 'sample', 1, block=False, callback=self.reallocating.clear)
@@ -733,7 +738,7 @@ class Thinker(BaseThinker):
                 was_successful = difference < self.energy_tolerance
                 traj.set_validation(was_successful)
                 self.logger.info(f'Audit for run of {traj.last_run_length} steps for {traj_id} complete.'
-                                 f' Result: {was_successful}. Difference: {difference:.3f} eV/atom')
+                                 f' Result: {was_successful}. Difference: {difference * 1000:.1f} meV/atom')
 
                 # Update the audit history
                 self.audit_results.append(difference / traj.last_run_length)
@@ -743,7 +748,7 @@ class Thinker(BaseThinker):
                     self.search_space.append(traj)  # Put it to the back of the list
             else:
                 # Just print the performance
-                self.logger.info(f'Difference between ML and DFT: {difference:.3f} eV/atom')
+                self.logger.info(f'Difference between ML and DFT: {difference * 1000:.1f} meV/atom')
 
             # Store in the training set
             if difference < 1e6:
@@ -977,7 +982,7 @@ if __name__ == '__main__':
                             learning_rate=args.learning_rate,
                             huber_deltas=args.huber_deltas)
     my_eval_schnet = _wrap(schnet.evaluate, device='cuda')
-    my_run_simulation = _wrap(run_calculator, calc=calc, temp_path='/lus/grand/projects/CSC249ADCD08/psi4')
+    my_run_simulation = _wrap(run_calculator, calc=calc, temp_path='/lus/eagle/projects/ExaLearn/psi4')
 
     # Determine which sampling method to use
     sampler_kwargs = {}
