@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import json
 
+from ase.calculators.psi4 import Psi4
 from tqdm import tqdm
 import pandas as pd
 import torch
@@ -34,8 +35,12 @@ if __name__ == "__main__":
     # Load in the options
     with open(run_path.parent / 'runparams.json') as fp:
         run_params = json.load(fp)
-    assert run_params['calculator'] == 'ttm'
-    ttm = TTMCalculator()
+    if run_params['calculator'] == 'ttm':
+        target_calc = TTMCalculator()
+    elif run_params['calculator']:
+        target_calc = Psi4(method='pbe0', basis='aug-cc-pvdz', num_threads=12)
+    else:
+        raise ValueError('Calculator not supported')
 
     # Load in the model and structures to be sampled
     model = torch.load(run_path / 'model', map_location='cpu')
@@ -57,7 +62,7 @@ if __name__ == "__main__":
     out_csv = output_dir / 'sampled.csv'
     mctbp = MCTBP(scratch_dir=output_dir, return_minima_only=True)
     with out_csv.open('w') as fp:
-        writer = DictWriter(fp, fieldnames=['structure', 'n_waters', 'minimum_num', 'xyz', 'ml_energy', 'ml_forces', 'ttm_energy', 'ttm_forces'])
+        writer = DictWriter(fp, fieldnames=['structure', 'n_waters', 'minimum_num', 'xyz', 'ml_energy', 'ml_forces', 'target_energy', 'target_forces'])
         writer.writeheader()
 
         for _, row in tqdm(structures.iterrows(), total=len(structures), desc='Structures'):
@@ -70,9 +75,9 @@ if __name__ == "__main__":
 
             # Compute their energies
             for i, new_atoms in enumerate(structures):
-                ttm_atoms = new_atoms.copy()
-                ttm_atoms.calc = ttm
-                ttm_atoms.get_forces()  # Cache result
+                target_atoms = new_atoms.copy()
+                target_atoms.calc = target_calc
+                target_atoms.get_forces()  # Caches result
                 writer.writerow({
                     'structure': row['id'],
                     'n_waters': row['n_waters'],
@@ -80,6 +85,6 @@ if __name__ == "__main__":
                     'xyz': write_to_string(new_atoms, 'xyz'),
                     'ml_energy': new_atoms.get_potential_energy(),
                     'ml_forces': json.dumps(new_atoms.get_forces().tolist()),
-                    'ttm_energy': ttm_atoms.get_potential_energy(),
-                    'ttm_forces': json.dumps(ttm_atoms.get_forces().tolist()),
+                    'target_energy': target_atoms.get_potential_energy(),
+                    'target_forces': json.dumps(target_atoms.get_forces().tolist()),
                 })
