@@ -19,6 +19,7 @@ from ttm.ase import TTMCalculator
 
 from fff.sampling.mctbp import MCTBP
 from fff.learning.gc.ase import SchnetCalculator
+from fff.sampling.md import MolecularDynamics
 from fff.simulation import run_calculator
 from fff.simulation.utils import read_from_string, write_to_string
 
@@ -32,6 +33,9 @@ if __name__ == "__main__":
     parser.add_argument('--overwrite', action='store_true', help='Whether to re-do an existing computation')
     parser.add_argument('--endpoint', default=None, help='If provided, will execute computation on this endpoint')
     parser.add_argument('--psi4-threads', default=os.cpu_count(), type=int, help='Number of threads to use for each Psi4 invocation')
+    parser.add_argument('--md-log-frequency', default=10, type=int, help='Number of steps between saving structures')
+    parser.add_argument('--md-temperature', default=200, type=int, help='Sampling temperature')
+    parser.add_argument('--sampling-method', default='mctbp', choices=['mctbp', 'md'], help='Method used for sampling')
     parser.add_argument('run_dir', help='Path for the run being evaluated')
     args = parser.parse_args()
 
@@ -57,7 +61,10 @@ if __name__ == "__main__":
     structures = pd.read_csv(structures_to_sample).query('n_waters > 6')
 
     # Save our run settings
-    output_dir = run_path / 'mctbp'
+    output_name = args.sampling_method
+    if args.sampling_method == 'md':
+        output_name += f"-T{args.md_temperature}-L{args.num_steps}"
+    output_dir = run_path / output_name
     if output_dir.is_dir():
         if args.overwrite:
             shutil.rmtree(output_dir)
@@ -67,17 +74,25 @@ if __name__ == "__main__":
     with open(output_dir / 'params.json', 'w') as fp:
         json.dump(args.__dict__, fp)
 
+    # Create the sampler
+    if args.sampling_method == 'mctbp':
+        mctbp = MCTBP(scratch_dir=output_dir, return_minima_only=True)
+        sample_func = partial(mctbp.run_sampling, device=args.device, random_seed=1)
+    elif args.sampling_method == 'md':
+        mctbp = MolecularDynamics(scratch_dir=output_dir.absolute())
+        sample_func = partial(mctbp.run_sampling, device=args.device, temperature=args.md_temperature, log_interval=args.md_log_frequency)
+    else:
+        raise ValueError(f'Sampling method not implemented: {args.sampling_method}')
+
     # Sample all structures
     out_csv = output_dir / 'sampled.csv'
-    mctbp = MCTBP(scratch_dir=output_dir, return_minima_only=True)
     all_structures: list[tuple[ase.Atoms, dict]] = []
     for _, row in tqdm(structures.iterrows(), total=len(structures), desc='Sampling'):
         # Run sampling for the prescribed number of steps
         atoms = read_from_string(row['xyz'], 'xyz')
 
         # Produce the minima
-        _, structures = mctbp.run_sampling(atoms, args.num_steps, calc,
-                                           device=args.device, random_seed=1)
+        _, structures = sample_func(atoms, args.num_steps, calc)
 
         # Put in them a list of structures to be run
         for i, new_atoms in enumerate(structures):
@@ -109,7 +124,8 @@ if __name__ == "__main__":
 
 
     with out_csv.open('w') as fp:
-        writer = DictWriter(fp, fieldnames=['structure', 'n_waters', 'minimum_num', 'xyz', 'ml_energy', 'ml_forces', 'target_energy', 'target_forces'])
+        writer = DictWriter(fp, fieldnames=['structure', 'n_waters', 'minimum_num', 'xyz', 'ml_energy', 'ml_forces',
+                                            'target_energy', 'target_forces', 'kinetic_energy'])
         writer.writeheader()
 
         # Submit everything
@@ -144,14 +160,14 @@ if __name__ == "__main__":
                             print('Resubmitting a task that failed because of manager lost')
                             futures.add(_submit(future.atoms, future.metadata))
                         else:
-                            executor.shutdown(cancel_futures=True)  # End ungracefully
-                            raise future.exception()
-
+                            print(f'Task failed due to: {exc}. Skipping')
+                            pbar.update(1)
                     else:
                         pbar.update(1)
                         metadata = future.metadata
                         atoms = read_from_string(future.result(), 'json')
                         metadata['target_energy'] = atoms.get_potential_energy()
                         metadata['target_forces'] = json.dumps(atoms.get_forces().tolist())
+                        metadata['kinetic_energy'] = atoms.get_kinetic_energy()
 
                         writer.writerow(metadata)
