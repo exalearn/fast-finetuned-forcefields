@@ -59,7 +59,7 @@ class MolecularDynamics(CalculatorBasedSampler):
                 # Define the output path
                 traj_path = Path(tmp) / "md.traj"
                 logger.info(f'Writing trajectory to {traj_path}')
-                props_to_write = ['energy', 'forces']
+                props_to_write = ['energy', 'forces', 'momenta']
                 with Trajectory(str(traj_path), mode='w', atoms=atoms, properties=props_to_write) as traj:
                     dyn.attach(traj, interval=log_interval)
 
