@@ -3,8 +3,11 @@
 
 script_dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
+ep=08d55756-0d6f-445e-bb7d-0efd039c5aa7
 for run in $@; do
     echo $run
     python $script_dir/train-model.py --learning-rate 1e-4 --num-epochs 256 --max-force 10 $run
-    python $script_dir/run-sampling.py --num-steps 10 --device cuda --endpoint 698fba9a-4b12-4e0b-b83a-be6ded509946 --psi4-threads 64 $run
+    python $script_dir/run-sampling.py --num-steps 16 --device cuda --endpoint $ep --psi4-threads 64 $run
+    python $script_dir/run-sampling.py --structure-source pure --num-steps 100 --md-log-frequency 10 --sampling-method md --device cuda --endpoint $ep --psi4-threads 64 $run
+    python $script_dir/run-sampling.py --structure-source pure --num-steps 50000 --md-log-frequency 2500 --sampling-method md --device cuda --endpoint $ep --psi4-threads 64 $run
 done

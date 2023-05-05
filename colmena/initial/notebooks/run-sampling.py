@@ -11,6 +11,7 @@ import json
 from random import shuffle
 
 import ase
+from ase.db import connect
 from globus_compute_sdk import Executor
 from tqdm import tqdm
 import pandas as pd
@@ -23,7 +24,9 @@ from fff.sampling.md import MolecularDynamics
 from fff.simulation import run_calculator
 from fff.simulation.utils import read_from_string, write_to_string
 
-structures_to_sample = Path(__file__).parent / '../../../notebooks/nwchem-evaluation/example_structures.csv'
+_my_dir = Path(__file__).parent
+pure_water = _my_dir / '../../../notebooks/nwchem-evaluation/example_structures.csv'
+methane = _my_dir / '../../../notebooks/introduce-methane/methane-added.db'
 
 if __name__ == "__main__":
     # Get input arguments
@@ -36,6 +39,8 @@ if __name__ == "__main__":
     parser.add_argument('--md-log-frequency', default=10, type=int, help='Number of steps between saving structures')
     parser.add_argument('--md-temperature', default=200, type=int, help='Sampling temperature')
     parser.add_argument('--sampling-method', default='mctbp', choices=['mctbp', 'md'], help='Method used for sampling')
+    parser.add_argument('--structure-source', default='pure', choices=['pure', 'methane'],
+                        help='Which structures to use for validation')
     parser.add_argument('run_dir', help='Path for the run being evaluated')
     args = parser.parse_args()
 
@@ -58,10 +63,24 @@ if __name__ == "__main__":
     # Load in the model and structures to be sampled
     model = torch.load(run_path / 'model', map_location='cpu')
     calc = SchnetCalculator(model)
-    structures = pd.read_csv(structures_to_sample).query('n_waters > 6')
+
+    if args.structure_source == 'pure':
+        structures = pd.read_csv(pure_water).query('n_waters > 6')
+    elif args.structure_source == 'methane':
+        structures = []
+        with connect(methane) as db:
+            for i, row in zip(range(16), db.select()):
+                atoms = row.toatoms()
+                structures.append({
+                    'xyz': write_to_string(atoms, 'xyz'),
+                    'id': f'methane-{i}'
+                })
+        structures = pd.DataFrame(structures)
+    else:
+        raise ValueError(f'Not implemented: {args.structure_source}')
 
     # Save our run settings
-    output_name = args.sampling_method
+    output_name = args.sampling_method + "-" + args.structure_source
     if args.sampling_method == 'md':
         output_name += f"-T{args.md_temperature}-L{args.num_steps}"
     output_dir = run_path / output_name
@@ -79,8 +98,8 @@ if __name__ == "__main__":
         mctbp = MCTBP(scratch_dir=output_dir, return_minima_only=True)
         sample_func = partial(mctbp.run_sampling, device=args.device, random_seed=1)
     elif args.sampling_method == 'md':
-        mctbp = MolecularDynamics(scratch_dir=output_dir.absolute())
-        sample_func = partial(mctbp.run_sampling, device=args.device, temperature=args.md_temperature, log_interval=args.md_log_frequency)
+        md = MolecularDynamics(scratch_dir=output_dir.absolute())
+        sample_func = partial(md.run_sampling, device=args.device, temperature=args.md_temperature, log_interval=args.md_log_frequency, timestep=0.2)
     else:
         raise ValueError(f'Sampling method not implemented: {args.sampling_method}')
 
@@ -91,8 +110,13 @@ if __name__ == "__main__":
         # Run sampling for the prescribed number of steps
         atoms = read_from_string(row['xyz'], 'xyz')
 
+        # Compute its property
+        atoms.calc = calc
+
         # Produce the minima
-        _, structures = sample_func(atoms, args.num_steps, calc)
+        last, structures = sample_func(atoms, args.num_steps, calc)
+        structures.insert(0, atoms)
+        structures.append(last)
 
         # Put in them a list of structures to be run
         for i, new_atoms in enumerate(structures):
@@ -100,7 +124,6 @@ if __name__ == "__main__":
                 new_atoms.copy(),
                 {
                     'structure': row['id'],
-                    'n_waters': row['n_waters'],
                     'minimum_num': i,
                     'xyz': write_to_string(new_atoms, 'xyz'),
                     'ml_energy': new_atoms.get_potential_energy(),
@@ -120,7 +143,7 @@ if __name__ == "__main__":
         try:
             yield output
         finally:
-            output.shutdown(cancel_futures=True, wait=False)
+            output.shutdown(cancel_futures=True, wait=True)
 
 
     with out_csv.open('w') as fp:
