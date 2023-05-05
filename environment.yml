@@ -30,6 +30,6 @@ dependencies:
       - colmena>=0.3.0
       - globus-cli
       - schnetpack==1.*
-      - funcx
-      - funcx-endpoint
+      - globus-compute-sdk
+      - globus-compute-endpoint
       - -e .
