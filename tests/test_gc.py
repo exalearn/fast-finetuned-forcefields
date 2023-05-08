@@ -39,6 +39,12 @@ def test_data_loader(example_waters, tmp_path):
     assert np.isclose(dataset[0].pos, pos).all()
 
 
+def test_data_max_size(example_waters, tmp_path):
+    dataset = AtomsDataset.from_atoms(example_waters, root=tmp_path, max_size=1)
+    assert len(dataset) == 1
+
+
+
 def test_run(model, ff, tmp_path):
     water = build.molecule('H2O')
     energies, forces = ff.evaluate(model, [water] * 4)

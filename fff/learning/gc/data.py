@@ -46,19 +46,21 @@ class AtomsDataset(InMemoryDataset):
     def __init__(self,
                  db_path: str | Path,
                  root: Optional[str] = None,
+                 max_size: int | None = None,
                  transform: Optional[Callable] = None,
                  pre_transform: Optional[Callable] = None,
                  pre_filter: Optional[Callable] = None
                  ):
         """
         Args:
-
             root: Directory where processed output will be saved
+            max_size: Maximum number of entries in dataset. Will pick the first entries.
             transform: Transform to apply to data
             pre_transform: Pre-transform to apply to data
             pre_filter: Pre-filter to apply to data
         """
         self.db_path = Path(db_path).absolute()
+        self.max_size = max_size
         super().__init__(root, transform, pre_transform, pre_filter)
         self.data, self.slices = torch.load(self.processed_paths[0])
 
@@ -95,6 +97,10 @@ class AtomsDataset(InMemoryDataset):
                         data = self.pre_transform(data)
 
                     data_list.append(data)
+
+                    # Break if we hit the maximum size
+                    if self.max_size is not None and len(data_list) == self.max_size:
+                        break
 
         torch.save(self.collate(data_list), self.processed_paths[0])
         return self.collate(data_list)

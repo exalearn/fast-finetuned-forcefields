@@ -31,6 +31,7 @@ def test_md(atoms):
     assert traj[0].get_forces().shape == (3, 3)
     assert traj[0].get_total_energy()
     assert traj[0].get_total_energy() == traj[-1].get_total_energy()
+    assert md_atoms.get_kinetic_energy() > 0
 
 
 def test_optimize(atoms):
