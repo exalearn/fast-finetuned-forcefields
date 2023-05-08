@@ -4,6 +4,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+from torch_geometric.nn import radius_graph
 from torch.nn.init import xavier_uniform_, zeros_
 from torch_geometric.nn.models.schnet import GaussianSmearing, \
     InteractionBlock, ShiftedSoftplus
