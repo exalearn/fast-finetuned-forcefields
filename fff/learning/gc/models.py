@@ -207,6 +207,8 @@ class SchNet(nn.Module):
                 boxsize=boxsize,
             )
         elif self.neighbor_method == 'radius':
+            if boxsize is not None:
+                raise ValueError("boxsize must be None if radius graph is used.")
             edge_index = radius_graph(data.pos, r=self.cutoff, batch=data.batch,
                                       max_num_neighbors=self.max_num_neighbors)
 
