@@ -7,7 +7,7 @@ from ase import build
 from ase.build import molecule
 from pytest import fixture
 
-from fff.learning.gc.ase import SchnetCalculator
+from fff.learning.gc.ase import SchnetCalculator, PBCSchnetCalculator
 from fff.learning.gc.data import AtomsDataset
 from fff.learning.gc.functions import GCSchNetForcefield
 from fff.learning.gc.models import SchNet, load_pretrained_model
@@ -114,7 +114,10 @@ def test_pbc_lone_water(model, test_file_path, ff):
     water.cell = [15] * 3
     water.pbc = True
     water.center()
-    isolated_energy, isolated_forces = ff.evaluate(model, [water])
+    water.set_calculator(PBCSchnetCalculator(model))
+    isolated_energy = water.get_potential_energy()
+    isolated_forces = water.get_forces()
+    #isolated_energy, isolated_forces = ff.evaluate(model, [water])
 
     assert np.isclose(isolated_energy, orig_energy).all()
     assert np.isclose(isolated_forces, orig_forces).all()
@@ -129,7 +132,10 @@ def test_pbc_lone_water(model, test_file_path, ff):
 
     # Repeat the box, and ensure the energy changes predictably
     water *= [2, 2, 2]
-    sc_energy, sc_forces = ff.evaluate(model, [water])
+    water.set_calculator(PBCSchnetCalculator(model))
+    sc_energy = water.get_potential_energy()
+    sc_forces = water.get_forces()
+    #sc_energy, sc_forces = ff.evaluate(model, [water])
     sc_forces = np.array(sc_forces)
 
     assert not np.isclose(sc_energy, pbc_energy * 8).all()
