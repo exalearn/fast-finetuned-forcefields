@@ -5,10 +5,11 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 from torch.nn.init import xavier_uniform_, zeros_
-from torch_geometric.nn import knn_graph, radius_graph
 from torch_geometric.nn.models.schnet import GaussianSmearing, \
     InteractionBlock, ShiftedSoftplus
 from torch_scatter.scatter import scatter_add
+
+from gc import knn_graph
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ class SchNet(nn.Module):
                  batch_size: Optional[int] = None,
                  mean: Optional[float] = None,
                  std: Optional[float] = None,
-                 box_size: Optional[Union[np.ndarray, float]] = None,):
+                 boxsize: Optional[Union[torch.Tensor, float]] = None,):
         """
         :param num_features (int): The number of hidden features used by both
             the atomic embedding and the convolutional filters (default: 100).
@@ -134,6 +135,8 @@ class SchNet(nn.Module):
 
         # Reference energies for each atom type
         self.atom_ref = nn.Embedding(100, 1, padding_idx=0)
+        
+        self.box_size = boxsize
 
         self.reset_parameters()
 
