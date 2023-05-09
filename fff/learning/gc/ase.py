@@ -63,7 +63,7 @@ class SchnetCalculator(Calculator):
         if atoms is not None:
             self.atoms = atoms.copy()
 
-        Calculator.calculate(self, atoms, properties, system_changes, boxsize=None)
+        Calculator.calculate(self, atoms, properties, system_changes)
 
         # Convert the atoms object to a PyG Data
         data = convert_atoms_to_pyg(atoms)
@@ -75,6 +75,6 @@ class SchnetCalculator(Calculator):
 
         # Run the "batch"
         data.to(self.device)
-        energy, gradients = eval_batch(self.net, data, boxsize=atoms.cell if any(atoms.pbc) else None)
+        energy, gradients = eval_batch(self.net, data, boxsize=atoms.cell.lengths()[0] if any(atoms.pbc) else None)
         self.results['energy'] = energy.item()
         self.results['forces'] = gradients.cpu().detach().numpy().squeeze()
