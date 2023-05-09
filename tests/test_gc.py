@@ -30,6 +30,11 @@ def test_load_schnet(test_file_path):
     assert model.atom_ref.weight.detach().numpy().max() == 0
 
 
+def test_set_ref(model):
+    model.set_reference_energy('H', 1)
+    assert model.atom_ref.weight.detach().numpy()[1] == 1
+
+
 def test_data_loader(example_waters, tmp_path):
     dataset = AtomsDataset.from_atoms(example_waters, root=tmp_path)
 
@@ -42,7 +47,6 @@ def test_data_loader(example_waters, tmp_path):
 def test_data_max_size(example_waters, tmp_path):
     dataset = AtomsDataset.from_atoms(example_waters, root=tmp_path, max_size=1)
     assert len(dataset) == 1
-
 
 
 def test_run(model, ff, tmp_path):

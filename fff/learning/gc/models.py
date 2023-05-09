@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+from ase import data
 import torch
 import torch.nn as nn
 from torch.nn.init import xavier_uniform_, zeros_
@@ -170,6 +171,18 @@ class SchNet(nn.Module):
         xavier_uniform_(self.lin2.weight)
         zeros_(self.lin2.bias)
         zeros_(self.atom_ref.weight)
+
+    def set_reference_energy(self, element: str, energy: float):
+        """Set the reference energy for an element
+
+        Args:
+            element: Element to be adjusted
+            energy: Energy to use as the reference
+        """
+
+        with torch.no_grad():
+            z = data.atomic_numbers[element]
+            self.atom_ref.weight[z] = energy
 
     def forward(self, data):
         """
