@@ -10,7 +10,7 @@ from torch_geometric.nn.models.schnet import GaussianSmearing, \
     InteractionBlock, ShiftedSoftplus
 from torch_scatter.scatter import scatter_add
 
-from fff.learning.gc.torch import pbc_knn_graph
+from fff.learning.gc import knn
 
 logger = logging.getLogger(__name__)
 
@@ -193,7 +193,7 @@ class SchNet(nn.Module):
                     loop=False,
                 )
             else:
-                edge_index = pbc_knn_graph(
+                edge_index = knn.knn_graph(
                     data.pos,
                     self.max_num_neighbors,
                     data.batch,

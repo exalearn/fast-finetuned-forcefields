@@ -122,7 +122,7 @@ def test_pbc_lone_water(model, test_file_path, ff):
     assert np.isclose(isolated_energy, orig_energy).all()
     assert np.isclose(isolated_forces, orig_forces).all()
 
-    # Shrink the box, the energy should change
+    # Shrink the box and expand it such that the , the energy should change
     water.cell = [5.] * 3
     water.center()
     pbc_energy = calc.get_potential_energy(water)

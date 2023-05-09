@@ -1,6 +1,8 @@
-"""Functions for modified knn graph with eprdiodic boundary conditions."""
+"""Functions for modified knn graph with periodic boundary conditions."""
 import torch
+import torch_cluster
 import scipy.spatial
+
 
 def knn(x, y, k, batch_x=None, batch_y=None, boxsize=None):
     r"""Finds for each element in :obj:`y` the :obj:`k` nearest points in
@@ -69,7 +71,7 @@ def knn(x, y, k, batch_x=None, batch_y=None, boxsize=None):
 
     max_xy = max(x.max().item(), y.max().item())
     x, y, = x / max_xy, y / max_xy
-    
+
     # Concat batch/features to ensure no cross-links between examples exist.
     x = torch.cat([x, 2 * x.size(1) * batch_x.view(-1, 1).to(x.dtype)], dim=-1)
     y = torch.cat([y, 2 * y.size(1) * batch_y.view(-1, 1).to(y.dtype)], dim=-1)
@@ -78,20 +80,21 @@ def knn(x, y, k, batch_x=None, batch_y=None, boxsize=None):
     tree = scipy.spatial.cKDTree(x.detach().numpy(), boxsize=boxsize)
     dist, col = tree.query(
         y.detach().cpu(), k=k, distance_upper_bound=x.size(1))
-    
+
     dist = torch.from_numpy(dist).to(x.dtype)
     col = torch.from_numpy(col).to(torch.long)
     row = torch.arange(col.size(0), dtype=torch.long).view(-1, 1).repeat(1, k)
-    
-    #mask = 1 - torch.isinf(dist).view(-1)
+
+    # mask = 1 - torch.isinf(dist).view(-1)
     mask = ~torch.isinf(dist).view(-1)
-    
+
     row, col = row.view(-1)[mask], col.view(-1)[mask]
 
     if not return_cuda:
         return torch.stack([row, col], dim=0)
     else:
         return torch.stack([row, col], dim=0).to(device=f"cuda:{device}")
+
 
 def knn_graph(x, k, batch=None, loop=False, flow='source_to_target', boxsize=None):
     r"""Computes graph edges to the nearest :obj:`k` points.
