@@ -4,6 +4,7 @@ import pickle as pkl
 
 import torch
 from ase import build
+from ase.build import molecule
 from pytest import fixture
 
 from fff.learning.gc.ase import SchnetCalculator
@@ -101,3 +102,45 @@ def test_ase(model, example_waters):
     calc2 = pkl.loads(pkl.dumps(calc))
     forces2 = calc2.get_forces(atoms)
     assert np.isclose(forces2, forces).all()
+
+
+def test_pbc_lone_water(model, test_file_path, ff):
+    # Get the energy of water
+    water = molecule('H2O')
+    model = load_pretrained_model(test_file_path / 'example-schnet.pt')
+    orig_energy, orig_forces = ff.evaluate(model, [water])
+    calc = SchnetCalculator(model)
+
+    # Put the water in the middle of a huge, cubic box
+    water.cell = [15] * 3
+    water.pbc = True
+    water.center()
+    water.calc = calc
+    isolated_energy = water.get_potential_energy()
+    isolated_forces = water.get_forces()
+
+    assert np.isclose(isolated_energy, orig_energy).all()
+    assert np.isclose(isolated_forces, orig_forces).all()
+
+    # Shrink the box and expand it such that it is larger than the cutoff. The energy should change
+    water.cell = [5.] * 3
+    water *= [4, 4, 4]
+    water.center()
+    pbc_energy = calc.get_potential_energy(water)
+    pbc_forces = calc.get_forces(water)
+    pbc_forces = np.array(pbc_forces)
+
+    assert not np.isclose(pbc_energy, orig_energy * 64).all()
+    assert not np.isclose(pbc_forces[-3:, :], orig_forces).all()
+
+    # Repeat the box, and ensure the energy changes predictably
+    water *= [2, 2, 2]
+    sc_energy = calc.get_potential_energy(water)
+    sc_forces = calc.get_forces(water)
+    sc_forces = np.array(sc_forces)
+
+    assert np.isclose(sc_energy, pbc_energy * 8).all()
+    assert np.isclose(sc_forces[-3:, :], pbc_forces[-3:, :], atol=1e-3).all()
+
+    for start in range(len(water), 3):
+        assert np.isclose(sc_forces[:3, :], sc_forces[start: start + 3, :], atol=1e-3).all(), f'Molecule {start // 3} fails'
