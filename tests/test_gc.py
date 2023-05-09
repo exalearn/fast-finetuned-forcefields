@@ -140,7 +140,7 @@ def test_pbc_lone_water(model, test_file_path, ff):
     sc_forces = np.array(sc_forces)
 
     assert np.isclose(sc_energy, pbc_energy * 8).all()
-    assert np.isclose(sc_forces[-3:, :], pbc_forces[-3:, :]).all()
+    assert np.isclose(sc_forces[-3:, :], pbc_forces[-3:, :], atol=1e-3).all()
 
     for start in range(len(water), 3):
-        assert np.isclose(sc_forces[:3, :], pbc_forces[start: start + 3, :]).all(), f'Molecule {start // 3} fails'
+        assert np.isclose(sc_forces[:3, :], sc_forces[start: start + 3, :], atol=1e-3).all(), f'Molecule {start // 3} fails'

@@ -1,4 +1,5 @@
 """Functions for modified knn graph with periodic boundary conditions."""
+import numpy as np
 import torch
 import torch_cluster
 import scipy.spatial
@@ -77,7 +78,7 @@ def knn(x, y, k, batch_x=None, batch_y=None, boxsize=None):
     y = torch.cat([y, 2 * y.size(1) * batch_y.view(-1, 1).to(y.dtype)], dim=-1)
 
     # Note: added boxsize to cKDTree
-    tree = scipy.spatial.cKDTree(x.detach().numpy(), boxsize=boxsize)
+    tree = scipy.spatial.cKDTree(x.detach().numpy(), boxsize=np.divide(boxsize, max_xy))
     dist, col = tree.query(
         y.detach().cpu(), k=k, distance_upper_bound=x.size(1))
 
