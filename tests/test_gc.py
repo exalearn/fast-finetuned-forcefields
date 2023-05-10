@@ -122,7 +122,7 @@ def test_pbc_lone_water(model, test_file_path, ff):
     assert np.isclose(isolated_forces, orig_forces, atol=1e-2).all()
 
     # Shrink the box and expand it such that it is larger than the cutoff. The energy should change
-    water.cell = [5.] * 3
+    water.cell = [4.] * 3
     water *= [4, 4, 4]
     pbc_energy = calc.get_potential_energy(water)
     pbc_forces = calc.get_forces(water)
@@ -131,6 +131,10 @@ def test_pbc_lone_water(model, test_file_path, ff):
     assert not np.isclose(pbc_energy, orig_energy * 64, atol=1e-4).all()
     assert not np.isclose(pbc_forces[-3:, :], orig_forces, atol=1e-2).all()
 
+    for start in range(0, len(water), 3):
+        max_diff = np.abs(pbc_forces[:3, :] - pbc_forces[start: start + 3, :]).max()
+        assert np.isclose(pbc_forces[:3, :], pbc_forces[start: start + 3, :], atol=1e-2).all(), f'Molecule {start // 3} fails. Max diff: {max_diff}'
+
     # Repeat the box, and ensure the energy changes predictably
     water *= [2, 2, 2]
     sc_energy = calc.get_potential_energy(water)
@@ -138,7 +142,8 @@ def test_pbc_lone_water(model, test_file_path, ff):
     sc_forces = np.array(sc_forces)
 
     assert np.isclose(sc_energy, pbc_energy * 8, atol=1e-2).all()
-    assert np.isclose(sc_forces[-3:, :], pbc_forces[-3:, :], atol=1e-1).all()
+    assert np.isclose(sc_forces[-3:, :], pbc_forces[-3:, :], atol=1e-2).all()
 
     for start in range(0, len(water), 3):
-        assert np.isclose(sc_forces[:3, :], sc_forces[start: start + 3, :], atol=1e-2).all(), f'Molecule {start // 3} fails. Position: {water.positions[start: start + 3, :]}'
+        max_diff = np.abs(sc_forces[:3, :] - sc_forces[start: start + 3, :]).max()
+        assert np.isclose(sc_forces[:3, :], sc_forces[start: start + 3, :], atol=1e-2).all(), f'Molecule {start // 3} fails. Max diff: {max_diff}'
