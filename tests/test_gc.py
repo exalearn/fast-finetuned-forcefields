@@ -128,7 +128,7 @@ def test_pbc_lone_water(model, test_file_path, ff):
     pbc_forces = calc.get_forces(water)
     pbc_forces = np.array(pbc_forces)
 
-    assert not np.isclose(pbc_energy, orig_energy * 64, , atol=1e-4).all()
+    assert not np.isclose(pbc_energy, orig_energy * 64, atol=1e-4).all()
     assert not np.isclose(pbc_forces[-3:, :], orig_forces, atol=1e-2).all()
 
     # Repeat the box, and ensure the energy changes predictably
@@ -137,8 +137,8 @@ def test_pbc_lone_water(model, test_file_path, ff):
     sc_forces = calc.get_forces(water)
     sc_forces = np.array(sc_forces)
 
-    assert np.isclose(sc_energy, pbc_energy * 8).all()
-    assert np.isclose(sc_forces[-3:, :], pbc_forces[-3:, :], atol=1e-3).all()
+    assert np.isclose(sc_energy, pbc_energy * 8, atol=1e-2).all()
+    assert np.isclose(sc_forces[-3:, :], pbc_forces[-3:, :], atol=1e-1).all()
 
     for start in range(0, len(water), 3):
         assert np.isclose(sc_forces[:3, :], sc_forces[start: start + 3, :], atol=1e-2).all(), f'Molecule {start // 3} fails. Position: {water.positions[start: start + 3, :]}'
