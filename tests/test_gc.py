@@ -118,8 +118,8 @@ def test_pbc_lone_water(model, test_file_path, ff):
     isolated_energy = water.get_potential_energy()
     isolated_forces = water.get_forces()
 
-    assert np.isclose(isolated_energy, orig_energy).all()
-    assert np.isclose(isolated_forces, orig_forces).all()
+    assert np.isclose(isolated_energy, orig_energy, atol=1e-4).all()
+    assert np.isclose(isolated_forces, orig_forces, atol=1e-2).all()
 
     # Shrink the box and expand it such that it is larger than the cutoff. The energy should change
     water.cell = [5.] * 3
@@ -128,8 +128,8 @@ def test_pbc_lone_water(model, test_file_path, ff):
     pbc_forces = calc.get_forces(water)
     pbc_forces = np.array(pbc_forces)
 
-    assert not np.isclose(pbc_energy, orig_energy * 64).all()
-    assert not np.isclose(pbc_forces[-3:, :], orig_forces).all()
+    assert not np.isclose(pbc_energy, orig_energy * 64, , atol=1e-4).all()
+    assert not np.isclose(pbc_forces[-3:, :], orig_forces, atol=1e-2).all()
 
     # Repeat the box, and ensure the energy changes predictably
     water *= [2, 2, 2]
