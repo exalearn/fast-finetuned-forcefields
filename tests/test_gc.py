@@ -94,7 +94,7 @@ def test_ase(model, example_waters):
 
     calc = SchnetCalculator(model)
     assert calc.device == 'cpu'
-    atoms.set_calculator(calc)
+    atoms.calc = calc
     forces = calc.get_forces(atoms)
     numerical_forces = calc.calculate_numerical_forces(atoms, d=1e-4)
     assert np.isclose(forces, numerical_forces, atol=1e-2).all()
@@ -114,7 +114,6 @@ def test_pbc_lone_water(model, test_file_path, ff):
     # Put the water in the middle of a huge, cubic box
     water.cell = [15] * 3
     water.pbc = True
-    water.center()
     water.calc = calc
     isolated_energy = water.get_potential_energy()
     isolated_forces = water.get_forces()
@@ -125,7 +124,6 @@ def test_pbc_lone_water(model, test_file_path, ff):
     # Shrink the box and expand it such that it is larger than the cutoff. The energy should change
     water.cell = [5.] * 3
     water *= [4, 4, 4]
-    water.center()
     pbc_energy = calc.get_potential_energy(water)
     pbc_forces = calc.get_forces(water)
     pbc_forces = np.array(pbc_forces)
@@ -142,5 +140,5 @@ def test_pbc_lone_water(model, test_file_path, ff):
     assert np.isclose(sc_energy, pbc_energy * 8).all()
     assert np.isclose(sc_forces[-3:, :], pbc_forces[-3:, :], atol=1e-3).all()
 
-    for start in range(len(water), 3):
-        assert np.isclose(sc_forces[:3, :], sc_forces[start: start + 3, :], atol=1e-3).all(), f'Molecule {start // 3} fails'
+    for start in range(0, len(water), 3):
+        assert np.isclose(sc_forces[:3, :], sc_forces[start: start + 3, :], atol=1e-2).all(), f'Molecule {start // 3} fails. Position: {water.positions[start: start + 3, :]}'
