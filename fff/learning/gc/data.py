@@ -18,8 +18,15 @@ def convert_atoms_to_pyg(mol: Atoms) -> Data:
         Converted object ready to be used in a PyG SchNet model
     """
 
-    # Center the cluster around 0
-    pos = mol.get_positions() - mol.get_center_of_mass()
+    # Normalize the coordinates
+    if any(mol.pbc):
+        # Ensure they are within the box
+        mol = mol.copy()
+        mol.wrap()
+        pos = mol.get_positions()  
+    else:
+        # Center the cluster around 0
+        pos = mol.get_positions() - mol.get_center_of_mass()
     pos = torch.tensor(pos, dtype=torch.float)  # coordinates
 
     # Only operate if there is a calculator
