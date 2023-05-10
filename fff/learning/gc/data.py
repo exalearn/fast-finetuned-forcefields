@@ -23,7 +23,7 @@ def convert_atoms_to_pyg(mol: Atoms) -> Data:
         # Ensure they are within the box
         mol = mol.copy()
         mol.wrap()
-        pos = mol.get_positions()  
+        pos = mol.get_positions()
     else:
         # Center the cluster around 0
         pos = mol.get_positions() - mol.get_center_of_mass()
