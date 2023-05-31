@@ -39,23 +39,27 @@ def _run_calculator(xyz: str, calc: Calculator | dict, temp_path: Optional[str] 
     # Parse the atoms object
     atoms = read_from_string(xyz, 'xyz')
 
+    start_dir = os.getcwd()
     with TemporaryDirectory(dir=temp_path, prefix='fff') as temp_dir:
-        # Execute from the temp so that the calculators do not interfere
-        os.chdir(temp_dir)
-
-        # Special case for Psi4 which sets the run directory on creating the object
-        if isinstance(calc, dict):
-            calc = calc.copy()
-            assert calc.pop('calc') == 'psi4', 'only psi4 is supported for now'
-            calc = Psi4(**calc, directory=temp_dir, PSI_SCRATCH=temp_path)
-
-        # Run the calculation
-        atoms.calc = calc
         try:
-            atoms.get_forces()
-            atoms.get_potential_energy()
-        except BaseException as exc:
-            raise ValueError(f'Calculation failed: {exc}')
+            # Execute from the temp so that the calculators do not interfere
+            os.chdir(temp_dir)
 
-        # Convert it to JSON
-        return write_to_string(atoms, 'json')
+            # Special case for Psi4 which sets the run directory on creating the object
+            if isinstance(calc, dict):
+                calc = calc.copy()
+                assert calc.pop('calc') == 'psi4', 'only psi4 is supported for now'
+                calc = Psi4(**calc, directory=temp_dir, PSI_SCRATCH=temp_path)
+
+            # Run the calculation
+            atoms.calc = calc
+            try:
+                atoms.get_forces()
+                atoms.get_potential_energy()
+            except BaseException as exc:
+                raise ValueError(f'Calculation failed: {exc}')
+
+            # Convert it to JSON
+            return write_to_string(atoms, 'json')
+        finally:
+            os.chdir(start_dir)
