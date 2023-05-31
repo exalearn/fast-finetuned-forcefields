@@ -14,7 +14,11 @@ ModelMsgType = TorchMessage | torch.nn.Module | Path
 
 
 class BaseLearnableForcefield:
-    """Define the functions for learning and evaluating a forcefield"""
+    """Define the functions for learning and evaluating a forcefield
+
+    Implementations must define the :meth:`evaluate` and :meth:`train` functions,
+    which provide an imperfect but sufficient interface for training the model.
+    """
 
     def __init__(self, scratch_dir: Path | None = None):
         """
@@ -32,7 +36,7 @@ class BaseLearnableForcefield:
         Args:
             model_msg: Model message (could be the model itself)
         Returns:
-            The model unserialized
+            The model, unserialized
         """
         if isinstance(model_msg, TorchMessage):
             return model_msg.get_model(map_location='cpu')
@@ -51,7 +55,7 @@ class BaseLearnableForcefield:
         """Run inference for a series of structures
 
         Args:
-            model_msg: Model to evaluate. Either a SchNet model or the bytes corresponding to a serialized model
+            model_msg: Model to evaluate
             atoms: List of structures to evaluate
             batch_size: Number of molecules to evaluate per batch
             device: Device on which to run the computation
