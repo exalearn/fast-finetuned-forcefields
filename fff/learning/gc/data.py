@@ -1,11 +1,13 @@
 import shutil
 from pathlib import Path
+from functools import partial
 from tempfile import TemporaryDirectory
-from typing import Optional, Callable
+from typing import Optional, Callable, Iterator
 
+import torch
 from ase.db import connect
 from ase import Atoms
-import torch
+from ase.db.row import AtomsRow
 from torch_geometric.data import InMemoryDataset, Data
 
 
@@ -39,26 +41,43 @@ def convert_atoms_to_pyg(mol: Atoms) -> Data:
     return Data(x=z, z=z, pos=pos, y=y, f=f, n_atoms=len(mol), size=size)
 
 
+def _preprocess(row: AtomsRow, pre_filter, pre_transform) -> Data | None:
+    """Preprocess function used by the dataset.
+
+    As a static function, so we can use it in a process pool"""
+    mol = row.toatoms()
+    init_data = convert_atoms_to_pyg(mol)
+    data = init_data
+
+    if pre_filter is not None and pre_filter(data):
+        return
+    if pre_transform is not None:
+        data = pre_transform(data)
+    return data
+
+
 # TODO (wardlt): Write diskless version
 class AtomsDataset(InMemoryDataset):
-    """Dataset created from a list of """
+    """Dataset created from a list of ase.Atoms objects"""
 
     def __init__(self,
                  db_path: str | Path,
                  root: Optional[str] = None,
+                 max_size: int | None = None,
                  transform: Optional[Callable] = None,
                  pre_transform: Optional[Callable] = None,
                  pre_filter: Optional[Callable] = None
                  ):
         """
         Args:
-
             root: Directory where processed output will be saved
+            max_size: Maximum number of entries in dataset. Will pick the first entries.
             transform: Transform to apply to data
             pre_transform: Pre-transform to apply to data
             pre_filter: Pre-filter to apply to data
         """
         self.db_path = Path(db_path).absolute()
+        self.max_size = max_size
         super().__init__(root, transform, pre_transform, pre_filter)
         self.data, self.slices = torch.load(self.processed_paths[0])
 
@@ -80,24 +99,39 @@ class AtomsDataset(InMemoryDataset):
         data_list = []
 
         # Loop over all datasets (there should be only one)
+        proc_fun = partial(_preprocess, pre_filter=self.pre_filter, pre_transform=self.pre_transform)
         for db_path in self.raw_paths:
-            with connect(db_path) as conn:
-                # Loop over all records
-                for row in conn.select(''):
-                    # Extract the data from the ASE records
-                    mol: Atoms = row.toatoms()
-                    data = convert_atoms_to_pyg(mol)
+            # Loop over all records
+            def _generate_atoms(batch_size=100000) -> Iterator[Atoms]:
+                row_count = 0
+                with connect(db_path) as conn:
+                    done = False
+                    while not done:
+                        done = True
 
-                    if self.pre_filter is not None and not self.pre_filter(data):
-                        continue
-                        # The graph edge_attr and edge_indices are created when the transforms are applied
-                    if self.pre_transform is not None:
-                        data = self.pre_transform(data)
+                        # Determine how many entries to draw
+                        if self.max_size is None:
+                            to_draw = batch_size  # The batch size
+                        else:
+                            to_draw = min(self.max_size - row_count, batch_size)  # Either the batch size or target number
+                            if to_draw <= 0:
+                                break
 
-                    data_list.append(data)
+                        # Pull that chunk
+                        for row in conn.select('', offset=row_count, limit=to_draw):
+                            done = False  # We're not done if we hit any data
+                            row_count += 1
+                            yield row
 
-        torch.save(self.collate(data_list), self.processed_paths[0])
-        return self.collate(data_list)
+            for x in map(proc_fun, _generate_atoms()):
+                if x is not None:
+                    data_list.append(x)
+
+        # Collate once
+        output = self.collate(data_list)
+        del data_list
+        torch.save(output, self.processed_paths[0])
+        return output
 
     @classmethod
     def from_atoms(cls, atoms_lst: list[Atoms], root: str | Path, **kwargs) -> 'AtomsDataset':

@@ -1,3 +1,3 @@
-# Scripts for Preparing for Runs
+# Preparation Notebooks
 
-These folders contain the steps needed before you can fit a forcefield, such as creating an initial dataset or training a first model.
+These directories contain the preparation for training models for different application problems.
