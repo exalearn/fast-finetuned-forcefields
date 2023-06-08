@@ -32,31 +32,33 @@ if __name__ == "__main__":
     group.add_argument('--energy-weight', default=0.1, type=float, help='Fractional weight to energy during training (0<x<1)')
     group.add_argument('--max-force', default=10, type=float, help='Maximum allowed force value')
 
+    parser.add_argument('--starting-model', default='md-100k-large')
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
 
     # Make the run directory
     config = args.__dict__.copy()
     config.pop('overwrite')
+    config.pop('starting_model')
     run_hash = sha512(json.dumps(config).encode()).hexdigest()[-8:]
-    run_dir = Path('runs') / f'n{args.num_epochs}-lr{args.learning_rate:.1e}-{run_hash}'
+    run_dir = Path('runs') / args.starting_model / f'n{args.num_epochs}-lr{args.learning_rate:.1e}-{run_hash}'
+    print(f'Saving run to {run_dir}')
     if run_dir.exists():
         if not args.overwrite:
             raise ValueError(f'Directory exists. Run with --overwrite to redo')
         else:
             shutil.rmtree(run_dir)
 
-    # Load the starting model
-    model = torch.load('ttm-run/starting_model.pth')
-
     # Unpack some inputs
     huber_eng, huber_force = args.huber_deltas
 
     # Split the data into subsets
+    starting_ttm_dir = Path('ttm-models') / args.starting_model
     train_data_dir = (run_dir / '..' / 'data' / f'maxF={args.max_force:.1f}').resolve()
     if not train_data_dir.exists():
+        print(f'No training data found in {train_data_dir}')
         train_data_dir.mkdir(parents=True, exist_ok=True)
-        with connect('ttm-run/train.db') as db:
+        with connect(starting_ttm_dir / 'train.db') as db:
             all_atoms = [a.toatoms() for a in db.select(f'fmax<{args.max_force}')]
         train_atoms, test_atoms = train_test_split(all_atoms, test_size=0.1)
         train_atoms, valid_atoms = train_test_split(train_atoms, test_size=0.1)
@@ -73,7 +75,7 @@ if __name__ == "__main__":
     # Start the training process
     schnet = GCSchNetForcefield()
     model, train_log = schnet.train(
-        'ttm-run/starting_model.pth',
+        starting_ttm_dir / 'starting_model.pth',
         train_atoms,
         valid_atoms,
         learning_rate=args.learning_rate,
