@@ -3,6 +3,7 @@ import os
 import time
 from collections import defaultdict
 from contextlib import redirect_stderr
+from csv import DictWriter
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -184,6 +185,13 @@ class GCSchNetForcefield(BaseLearnableForcefield):
                 # Store the log line
                 log.append({'epoch': epoch, 'time': time.perf_counter() - start_time, 'lr': optimizer.param_groups[0]['lr'],
                             **train_losses, **valid_losses})
+
+                # Write the log line to disk (used to monitor progress)
+                with open(td / 'log.csv', 'a') as fp:
+                    writer = DictWriter(fp, fieldnames=list(log[-1].keys()))
+                    if epoch == 0:
+                        writer.writeheader()
+                    writer.writerow(log[-1])
 
             # Load the best model back in
             best_model = torch.load(td / 'best_model', map_location='cpu')
