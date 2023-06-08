@@ -1,10 +1,11 @@
 """Test features related to simulation"""
+from concurrent.futures import TimeoutError
 
-import numpy as np
-from ase.calculators.lj import LennardJones
-import parsl
 from parsl import Config, ThreadPoolExecutor
-from pytest import mark
+from ase.calculators.lj import LennardJones
+from pytest import mark, raises
+import numpy as np
+import parsl
 
 from fff.simulation import run_calculator, write_to_string
 from fff.simulation.ase import CachedCalculator, AsyncCalculator
@@ -21,6 +22,23 @@ def test_single(calc, atoms):
     assert len(atoms) == 3
     assert 'forces' in atoms.calc.results  # Ensure that forces have been computed
     assert 'energy' in atoms.calc.results
+
+
+def test_same_process(atoms):
+    calc = LennardJones()
+    xyz = write_to_string(atoms, 'xyz')
+    atoms_msg = run_calculator(xyz, calc, subprocess=False)
+    atoms = read_from_string(atoms_msg, 'json')
+    assert len(atoms) == 3
+    assert 'forces' in atoms.calc.results  # Ensure that forces have been computed
+    assert 'energy' in atoms.calc.results
+
+
+def test_timeout(atoms):
+    calc = LennardJones()
+    xyz = write_to_string(atoms, 'xyz')
+    with raises(TimeoutError):
+        run_calculator(xyz, calc, timeout=1e-6)
 
 
 def test_cached(atoms, tmpdir):

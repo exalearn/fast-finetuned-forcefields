@@ -1,10 +1,9 @@
 """Convert data from JSON to the format used by SchNetPack"""
 
 from multiprocessing import Pool
-
-from ase.calculators.singlepoint import SinglePointCalculator
 from argparse import ArgumentParser
-
+from ase.calculators.singlepoint import SinglePointCalculator
+from ase import units
 from schnetpack.data import AtomsData
 from tqdm import tqdm
 from glob import glob
@@ -53,7 +52,7 @@ os.makedirs("data", exist_ok=False)
 
 # Make the SPK databases
 database = dict()
-for name in ['train', 'test']:
+for name in ['train', 'test', 'valid']:
     data = AtomsData(
         f"./data/{name}.db",
         available_properties=['energy', 'forces']
@@ -64,10 +63,7 @@ for name in ['train', 'test']:
 for file in files:
     # Get a name for this run
     name = os.path.basename(file)[5:-8]
-    if name in ['train', 'valid']:
-        db = database['train']
-    else:
-        db = database['test']
+    db = database[name]
 
     # Convert every cluster in the dataset to an ASE database
     with Pool() as pool:
@@ -81,8 +77,9 @@ for file in files:
                 records = [json.loads(i) for i, _ in zip(fp, range(args.batch_size))]
                 atoms = pool.map(atoms_from_dict, records)
 
-                # Collect the force and energy
-                properties = [{'energy': np.array([a.get_potential_energy()]), 'forces': np.zeros_like(a.positions)}
+                # Collect the force and energy in eV (converting from the kcal/mol in hydronet)
+                properties = [{'energy': np.array([a.get_potential_energy() / units.Hartree]),
+                               'forces': np.zeros_like(a.positions)}
                               for a in atoms]
 
                 # Add to the output

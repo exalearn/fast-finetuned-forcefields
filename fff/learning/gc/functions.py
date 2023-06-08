@@ -20,17 +20,18 @@ from fff.learning.base import BaseLearnableForcefield, ModelMsgType
 from fff.learning.util.messages import TorchMessage
 
 
-def eval_batch(model: SchNet, batch: Data) -> (torch.Tensor, torch.Tensor):
+def eval_batch(model: SchNet, batch: Data, boxsize: np.ndarray | None = None) -> (torch.Tensor, torch.Tensor):
     """Get the energies and forces for a certain batch of molecules
 
     Args:
         model: Model to evaluate
         batch: Batch of data to evaluate
+        boxsize: Size of the simulation cell (will be identical for all entries in batch)
     Returns:
         Energy and forces for the batch
     """
     batch.pos.requires_grad = True
-    energ_batch = model(batch)
+    energ_batch = model(batch, boxsize)
     force_batch = -torch.autograd.grad(energ_batch, batch.pos, grad_outputs=torch.ones_like(energ_batch), retain_graph=True)[0]
     return energ_batch, force_batch
 
@@ -48,6 +49,10 @@ class GCSchNetForcefield(BaseLearnableForcefield):
         # Place the model on the GPU in eval model
         model.eval()
         model.to(device)
+
+        # Make sure no atoms have PBCs
+        #  TODO (wardlt): Revise implementation to support them
+        assert all(not any(a.pbc) for a in atoms), 'We do not yet support bulk inference with PBCs'
 
         with TemporaryDirectory() as tmp:
             # Make the data loader

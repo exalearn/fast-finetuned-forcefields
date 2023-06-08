@@ -1,6 +1,7 @@
 """ASE interface to the model"""
 from io import BytesIO
 
+import ase
 import torch
 from ase.calculators.calculator import Calculator, all_changes
 
@@ -54,7 +55,7 @@ class SchnetCalculator(Calculator):
         return self.parameters['device']
 
     def calculate(
-            self, atoms=None, properties=None, system_changes=all_changes,
+            self, atoms: ase.Atoms = None, properties=None, system_changes=all_changes, boxsize=None,
     ):
         if properties is None:
             properties = self.implemented_properties
@@ -68,8 +69,12 @@ class SchnetCalculator(Calculator):
         data = convert_atoms_to_pyg(atoms)
         data.batch = torch.zeros((len(atoms)))  # Fake a single-item batch
 
+        # We only support either full PBCs or no PBCs
+        if any(atoms.pbc) and not all(atoms.pbc):
+            raise ValueError('You must have either all or no PBCs')
+
         # Run the "batch"
         data.to(self.device)
-        energy, gradients = eval_batch(self.net, data)
+        energy, gradients = eval_batch(self.net, data, boxsize=atoms.cell.lengths()[0] if any(atoms.pbc) else None)
         self.results['energy'] = energy.item()
         self.results['forces'] = gradients.cpu().detach().numpy().squeeze()
