@@ -87,4 +87,4 @@ class TAMMCalculator(FileIOCalculator):
             energy = output["SCF"]["final_energy"]
         else:
             raise NotImplementedError(f'No support for {level} yet')
-        self.results['energy'] = energy
+        self.results['energy'] = energy * units.Ha
