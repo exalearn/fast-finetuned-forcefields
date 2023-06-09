@@ -30,11 +30,14 @@ def run_tamm(atoms, tamm_command: str, tamm_template: dict, basis, scratch_dir: 
         - Energy (eV)
     """
     from fff.simulation.tamm import TAMMCalculator
-    from tempfile import TemporaryDirectory
+    from tempfile import mkdtemp
+    from shutil import rmtree
     from ase import units
     import time
 
-    with TemporaryDirectory(dir=scratch_dir) as tmpdir:
+    tmpdir = mkdtemp(dir=scratch_dir)
+    cleanup = False
+    try:
         calc = TAMMCalculator(
             directory=tmpdir,
             command=tamm_command,
@@ -46,6 +49,10 @@ def run_tamm(atoms, tamm_command: str, tamm_template: dict, basis, scratch_dir: 
 
         run_time = time.monotonic() - start_time
         energy = calc.get_potential_energy(atoms) / units.Ha
+        cleanup = True  # Cleanup if we succeed
+    finally:
+        if cleanup:
+            rmtree(tmpdir)
 
     return run_time, energy, forces
 
@@ -55,13 +62,14 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument('--max-repeats', default=1, help='Number of times to repeat the computations', type=int)
     parser.add_argument('--num-nodes', default=1, help='Number of nodes on which to run', type=int)
+    parser.add_argument('--ranks-per-node', default=1, help='Number of ranks per node', type=int)
     parser.add_argument('--basis', default='aug-cc-pvdz', help='Basis set to use for all atoms')
     parser.add_argument('--timeout', default=None, type=float, help='Timeout for DFT calculations')
     parser.add_argument('--method', default='HartreeFock', help='Method to run (based on the name of the executable)')
     args = parser.parse_args()
 
     # Recognize which node we're running on,
-    hostname = platform.node().rstrip('0123456789')
+    hostname = platform.node().rstrip('-0123456789')
     if hostname.startswith('bettik-linux'):
         tamm_command = f'mpirun -n 12 /home/lward/Software/nwchemex/tamm_install/bin/{args.method} tamm.json > tamm.out'
         parsl_exec = HighThroughputExecutor(
@@ -69,9 +77,8 @@ if __name__ == "__main__":
             provider=LocalProvider()
         )
     elif hostname.startswith('uan'):
-        ranks_per_node = 13
-        tamm_command = (f'mpiexec -n {args.num_nodes * ranks_per_node} --ppn {ranks_per_node} --depth=1 --cpu-bind depth --env OMP_NUM_THREADS=1 '
-                        f'/lus/gila/projects/CSC249ADCD08_CNDA/tamm/install/tamm_cc/bin/{args.method}')
+        tamm_command = (f'mpiexec -n {args.num_nodes * args.ranks_per_node} --ppn {args.ranks_per_node} --depth=1 --cpu-bind depth --env OMP_NUM_THREADS=1 '
+                        f'/lus/gila/projects/CSC249ADCD08_CNDA/tamm/install/tamm_cc/bin/{args.method} tamm.json > tamm.out')
         parsl_exec = HighThroughputExecutor(
             label='launch_from_mpi_nodes',
             max_workers=1,
@@ -81,6 +88,17 @@ if __name__ == "__main__":
                 nodes_per_block=args.num_nodes,
                 select_options='system=sunspot,place=scatter',
                 launcher=SimpleLauncher(),
+                walltime="1:00:00",
+                worker_init='''
+# Activate environment and drop into directory
+source /soft/datascience/conda-2023-01-31/miniconda3/bin/activate /lus/gila/projects/CSC249ADCD08_CNDA/fast-finetuned-forcefields/env-cpu
+cd ${PBS_O_WORKDIR}
+which python
+hostname
+pwd
+
+# TAMM-specific env variables
+export CRAYPE_LINK_TYPE=dynamic'''
             )
         )
 
@@ -99,13 +117,13 @@ if __name__ == "__main__":
 
     # Load in what has been run already
     out_file = Path('runtimes.csv')
-    fields = ['id', 'hostname', 'method', 'basis', 'n_waters', 'ttm_energy', 'qc_energy', 'runtime', 'num_nodes']
+    fields = ['id', 'hostname', 'method', 'basis', 'n_waters', 'ttm_energy', 'qc_energy', 'runtime', 'num_nodes', 'ranks_per_node']
     if not out_file.exists():
         with out_file.open('w', newline='') as fp:
             writer = DictWriter(fp, fieldnames=fields)
             writer.writeheader()
 
-    already_ran = pd.read_csv(out_file)[['id', 'hostname', 'method', 'num_nodes', 'basis']].apply(tuple, axis=1).tolist()
+    already_ran = pd.read_csv(out_file)[['id', 'hostname', 'method', 'num_nodes', 'ranks_per_node', 'basis']].apply(tuple, axis=1).tolist()
     print(f'Found {len(already_ran)} structures already in dataset')
 
     # Load in the Parsl configuration
@@ -117,9 +135,11 @@ if __name__ == "__main__":
     parsl.load(config)
 
     # Loop over them
+    run_dir = Path('tamm_runs')
+    run_dir.mkdir(exist_ok=True)
     for rid, row in tqdm(examples.iterrows()):
         # Make sure it has been run fewer than the desired number of times
-        if already_ran.count((row['id'], hostname, args.method, args.num_nodes, args.basis)) >= args.max_repeats:
+        if already_ran.count((row['id'], hostname, args.method, args.num_nodes, args.ranks_per_node, args.basis)) >= args.max_repeats:
             continue
 
         # Parse it as an ASE atoms object
@@ -127,7 +147,7 @@ if __name__ == "__main__":
         atoms.center()
 
         # Run it
-        future = run_tamm(atoms, tamm_command, template, args.basis, scratch_dir=None)
+        future = run_tamm(atoms, tamm_command, template, args.basis, scratch_dir=str(run_dir.absolute()))
         run_time, energy, forces = future.result()
 
         # Save results to disk
