@@ -8,16 +8,20 @@ from pytest import fixture
 from fff.simulation.tamm import TAMMCalculator
 
 _test_files = Path(__file__).parent / 'files'
-tamm_path = Path('/home/lward/Software/nwchemex/tamm_install/bin/CCSD_T')
+tamm_dir = Path('/home/lward/Software/nwchemex/tamm_install/bin/')
 
 
-@fixture()
-def tamm_command():
-    if tamm_path.exists():
-        return f"mpirun -n 2 {tamm_path} tamm.json > tamm.out"
+@fixture(params=[
+    'ccsd_t', 'cd_ccsd', 'scf'
+])
+def tamm_command(request):
+    level = request.param
+    if tamm_dir.exists():
+        exc = 'HartreeFock' if level == 'scf' else level.upper()
+        return f"mpirun -n 2 {tamm_dir}/{exc} tamm.json > tamm.out"
     else:
         return f'bash -c "mkdir -p tamm.cc-pvdz_files/restricted/json; cp {_test_files / "tamm-h2o.output.json"}' \
-               f' tamm.cc-pvdz_files/restricted/json/tamm.ccsd_t.json"'
+               f' tamm.cc-pvdz_files/restricted/json/tamm.{level}.json"'
 
 
 @fixture()

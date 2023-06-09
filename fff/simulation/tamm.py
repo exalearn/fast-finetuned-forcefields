@@ -84,7 +84,7 @@ class TAMMCalculator(FileIOCalculator):
         elif level == 'ccsd':
             energy = output["CCSD"]["final_energy"]["total"]
         elif level == "scf":
-            energy = output["SCF"]["final_energy"]["total"]
+            energy = output["SCF"]["final_energy"]
         else:
             raise NotImplementedError(f'No support for {level} yet')
         self.results['energy'] = energy
