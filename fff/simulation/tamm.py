@@ -33,7 +33,7 @@ class TAMMCalculator(FileIOCalculator):
             'coordinates': [],
             'units': 'bohr'
         }
-        positions_bohr = atoms.positions.copy() * units.Bohr
+        positions_bohr = atoms.positions.copy() / units.Bohr
         for sym, pos in zip(atoms.symbols, positions_bohr):
             coords = "\t".join(f"{x:.8f}" for x in pos)
             geometry['coordinates'].append(
