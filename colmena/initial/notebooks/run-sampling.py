@@ -25,8 +25,8 @@ from fff.simulation import run_calculator
 from fff.simulation.utils import read_from_string, write_to_string
 
 _my_dir = Path(__file__).parent
-pure_water = _my_dir / '../../../notebooks/nwchem-evaluation/example_structures.csv'
-methane = _my_dir / '../../../notebooks/introduce-methane/methane-added.db'
+pure_water = _my_dir / '../../../notebooks/hydronet/nwchem-evaluation/example_structures.csv'
+methane = _my_dir / '../../../notebooks/hydronet/introduce-methane/methane-added.db'
 
 if __name__ == "__main__":
     # Get input arguments
@@ -152,7 +152,7 @@ if __name__ == "__main__":
         writer.writeheader()
 
         # Submit everything
-        func = partial(run_calculator)
+        func = partial(run_calculator, subprocess=run_params['calculator'] != 'ttm')
         update_wrapper(func, run_calculator)
 
         with _make_exec() as executor:
