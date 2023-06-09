@@ -1,0 +1,157 @@
+{
+  "output": {
+    "SCF": {
+      "nucl_rep_energy": 32.45488609534699,
+      "iter": {
+        "1": {
+          "energy": -66.49755506295904,
+          "e_diff": -66.49755506295904,
+          "rmsd": 0.035334063299897446,
+          "performance": {
+            "total_time": 0.007400352
+          }
+        },
+        "2": {
+          "energy": -66.58389207112074,
+          "e_diff": -0.08633700816170631,
+          "rmsd": 0.010685363163192265,
+          "performance": {
+            "total_time": 0.007427723
+          }
+        },
+        "3": {
+          "energy": -66.59693060619715,
+          "e_diff": -0.0130385350764044,
+          "rmsd": 0.002174444994276464,
+          "performance": {
+            "total_time": 0.007637035
+          }
+        },
+        "4": {
+          "energy": -66.5972877666552,
+          "e_diff": -0.00035716045805145313,
+          "rmsd": 0.0003047373490760878,
+          "performance": {
+            "total_time": 0.00796485
+          }
+        },
+        "5": {
+          "energy": -66.59729171916628,
+          "e_diff": -3.952511079319265e-06,
+          "rmsd": 4.692413104161125e-05,
+          "performance": {
+            "total_time": 0.00827434
+          }
+        },
+        "6": {
+          "energy": -66.59729184208732,
+          "e_diff": -1.2292103690469958e-07,
+          "rmsd": 3.1730257957338067e-06,
+          "performance": {
+            "total_time": 0.008486539
+          }
+        },
+        "7": {
+          "energy": -66.59729184333442,
+          "e_diff": -1.2471019772419822e-09,
+          "rmsd": 9.517208233836627e-07,
+          "performance": {
+            "total_time": 0.008797412
+          }
+        },
+        "8": {
+          "energy": -66.59729184336538,
+          "e_diff": -3.0965452424425166e-11,
+          "rmsd": 9.61387536960127e-08,
+          "performance": {
+            "total_time": 0.009226106
+          }
+        },
+        "9": {
+          "energy": -66.59729184336565,
+          "e_diff": -2.7000623958883807e-13,
+          "rmsd": 7.86600759008647e-09,
+          "performance": {
+            "total_time": 0.009715443
+          }
+        }
+      },
+      "final_energy": -66.59729184336565,
+      "n_iterations": 9
+    },
+    "CD": {
+      "n_cholesky_vectors": 280
+    },
+    "CCSD": {
+      "iter": {
+        "1": {
+          "residual": 3.087587105034815e-09,
+          "correlation": -0.18376593828833457,
+          "performance": {
+            "total_time": 0.010830075
+          }
+        }
+      },
+      "n_iterations": 1,
+      "final_energy": {
+        "correlation": -0.18376593828833457,
+        "total": -66.78105778165398
+      }
+    },
+    "CCSD(T)": {
+      "[T]Energies": {
+        "correction": -0.002133014189463242,
+        "correlation": -0.1858989524777978,
+        "total": -66.78319079584345
+      },
+      "(T)Energies": {
+        "correction": -0.001939884571790357,
+        "correlation": -0.18570582286012494,
+        "total": -66.78299766622578
+      },
+      "performance": {
+        "total_time": 1.256154248,
+        "gflops": 0.6989587476203002,
+        "total_num_ops": 878000000.0,
+        "load_imbalance": 2.2409668275491512e-06
+      }
+    }
+  },
+  "input": {
+    "molecule": {
+      "name": "tamm",
+      "basisset": "cc-pvdz",
+      "gaussian_type": "cartesian",
+      "geometry_units": "bohr"
+    },
+    "SCF": {
+      "tol_int": 1e-16,
+      "tol_lindep": 1e-06,
+      "conve": 1e-09,
+      "convd": 1e-08,
+      "diis_hist": 10,
+      "AO_tilesize": 30,
+      "force_tilesize": "false",
+      "scf_type": "restricted",
+      "multiplicity": 1
+    },
+    "CD": {
+      "diagtol": 1e-12,
+      "max_cvecs_factor": 40
+    },
+    "CCSD": {
+      "threshold": 1e-06,
+      "tilesize": 40,
+      "itilesize": 1000,
+      "ndiis": 5,
+      "readt": "false",
+      "writet": "true",
+      "ccsd_maxiter": 100,
+      "balance_tiles": "true"
+    },
+    "CCSD_T": {
+      "skip_ccsd": false,
+      "ccsdt_tilesize": 28
+    }
+  }
+}
