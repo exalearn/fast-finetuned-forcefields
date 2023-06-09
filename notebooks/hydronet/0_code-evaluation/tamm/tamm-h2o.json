@@ -17,8 +17,8 @@
   "SCF": {
     "tol_int": 1e-16,
     "tol_lindep": 1e-06,
-    "conve": 1e-7,
-    "convd": 1e-6,
+    "conve": 1e-9,
+    "convd": 1e-8,
     "diis_hist": 10,
     "charge": 0,
     "multiplicity": 1,
@@ -38,7 +38,7 @@
     "writet": false,
     "ccsd_maxiter": 100,
     "CCSD(T)": {
-      "ccsdt_tilesize": 28
+      "ccsdt_tilesize": 40
     },
     "debug": false
   }
