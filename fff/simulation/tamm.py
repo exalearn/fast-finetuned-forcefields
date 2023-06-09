@@ -52,13 +52,13 @@ class TAMMCalculator(FileIOCalculator):
     def read_results(self):
         # Find the output directory
         output_paths = list(Path(self.directory).glob('tamm.*_files'))
-        if len(output_paths) > 1:
+        if len(output_paths) > 1:  # pragma: no cover
             raise ValueError(f'Found {len(output_paths)} output directories when expecting one')
         output_path = output_paths[0]
 
         # Find the highest-level computation that has been performed
         output_json_dir = output_path / 'restricted' / 'json'
-        if not output_json_dir.exists():
+        if not output_json_dir.exists():  # pragma: no cover
             raise ValueError('No output JSONs found')
 
         output_jsons = list(output_json_dir.glob('*.json'))
@@ -71,7 +71,7 @@ class TAMMCalculator(FileIOCalculator):
             if output_json is not None:
                 break
 
-        if output_json is None:
+        if output_json is None:  # pragma: no cover
             raise ValueError('No output file found')
 
         logging.info(f'Reading from {output_json}')
