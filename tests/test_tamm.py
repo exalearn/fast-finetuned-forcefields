@@ -12,7 +12,7 @@ tamm_dir = Path('/home/lward/Software/nwchemex/tamm_install/bin/')
 
 
 @fixture(params=[
-    'ccsd_t', 'cd_ccsd', 'scf'
+    'ccsd_t', 'cd_ccsd', 'scf', 'cd_mp2'
 ])
 def tamm_command(request):
     level = request.param
@@ -20,8 +20,9 @@ def tamm_command(request):
         exc = 'HartreeFock' if level == 'scf' else level.upper()
         return f"mpirun -n 2 {tamm_dir}/{exc} tamm.json > tamm.out"
     else:
-        return f'bash -c "mkdir -p tamm.cc-pvdz_files/restricted/json; cp {_test_files / "tamm-h2o.output.json"}' \
-               f' tamm.cc-pvdz_files/restricted/json/tamm.{level}.json"'
+        return f'bash -c "mkdir -p tamm.cc-pvdz_files/restricted/json;' \
+               f' cp {_test_files / "tamm-h2o.output.json"} tamm.cc-pvdz_files/restricted/json/tamm.{level}.json";' \
+               f' cp {_test_files / "tamm-h2o.out"} tamm.out'
 
 
 @fixture()
@@ -37,4 +38,5 @@ def tamm_template():
 
 def test_tamm(tamm_command, tamm_template, atoms, tmpdir):
     calc = TAMMCalculator(command=tamm_command, basisset='cc-pvdz', template=tamm_template, directory=tmpdir)
-    calc.get_potential_energy(atoms)
+    eng = calc.get_potential_energy(atoms)
+    assert eng < 0
