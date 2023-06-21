@@ -1,0 +1,41 @@
+[project]
+name = "fff"
+version = "0.0.1"
+authors = [
+    { name = "Logan Ward", email = "lward@anl.gov" },
+]
+description = 'Finetuned forcefields, fast'
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+keywords = ["HPC", "AI", "Workflows", "Quantum Chemsitry", "Materials Science"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Topic :: System :: Distributed Computing",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "colmena>=0.4.0",
+    "schnetpack~=1.0",
+    "torch~=1.12",
+]
+
+[tool.setuptools.packages.find]
+include = ['fff*']
+
+[project.urls]
+repository = "https://github.com/exalearn/fast-finetuned-forcefields"
+
+[project.optional-dependencies]
+test = [
+    'flake8',
+    'pytest',
+    'pytest-cov',
+]
