@@ -53,7 +53,7 @@ if __name__ == "__main__":
     huber_eng, huber_force = args.huber_deltas
 
     # Split the data into subsets
-    starting_ttm_dir = Path('ttm-models') / args.starting_model
+    starting_ttm_dir = Path('starting-models') / args.starting_model
     train_data_dir = (run_dir / '..' / 'data' / f'maxF={args.max_force:.1f}').resolve()
     if not train_data_dir.exists():
         print(f'No training data found in {train_data_dir}')
