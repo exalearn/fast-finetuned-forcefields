@@ -66,6 +66,7 @@ if __name__ == "__main__":
     parser.add_argument('--basis', default='aug-cc-pvdz', help='Basis set to use for all atoms')
     parser.add_argument('--timeout', default=None, type=float, help='Timeout for DFT calculations')
     parser.add_argument('--method', default='HartreeFock', help='Method to run (based on the name of the executable)')
+    parser.add_argument('--min-size', type=int, help='Minimum size to evaluate')
     args = parser.parse_args()
 
     # Recognize which node we're running on,
@@ -77,18 +78,19 @@ if __name__ == "__main__":
             provider=LocalProvider()
         )
     elif hostname.startswith('uan'):
-        tamm_command = (f'mpiexec -n {args.num_nodes * args.ranks_per_node} --ppn {args.ranks_per_node} --depth=1 --cpu-bind depth --env OMP_NUM_THREADS=1 '
-                        f'/lus/gila/projects/CSC249ADCD08_CNDA/tamm/install/tamm_cc/bin/{args.method} tamm.json > tamm.out')
+        tamm_command = (f'mpiexec -n {args.num_nodes * args.ranks_per_node} --ppn {args.ranks_per_node} --depth=1 --cpu-bind depth --env OMP_NUM_THREADS=1 --env FI_CXI_RX_MATCH_MODE=software'
+                        f' /lus/gila/projects/CSC249ADCD08_CNDA/tamm/install/tamm_cc/bin/{args.method} tamm.json > tamm.out')
         parsl_exec = HighThroughputExecutor(
             label='launch_from_mpi_nodes',
             max_workers=1,
             provider=PBSProProvider(
-                queue='debug',
+                queue='workq',
                 account='CSC249ADCD08_CNDA',
                 nodes_per_block=args.num_nodes,
                 select_options='system=sunspot,place=scatter',
                 launcher=SimpleLauncher(),
-                walltime="1:00:00",
+                cpus_per_node=108,
+                walltime="2:00:00",
                 worker_init='''
 # Activate environment and drop into directory
 source /soft/datascience/conda-2023-01-31/miniconda3/bin/activate /lus/gila/projects/CSC249ADCD08_CNDA/fast-finetuned-forcefields/env-cpu
@@ -98,7 +100,11 @@ hostname
 pwd
 
 # TAMM-specific env variables
-export CRAYPE_LINK_TYPE=dynamic'''
+export CRAYPE_LINK_TYPE=dynamic
+export FI_CXI_RX_MATCH_MODE=software
+module load mpich
+ONEAPI_MPICH_GPU=NO_GPU module load oneapi/eng-compiler/2022.12.30.003
+'''
             )
         )
 
@@ -142,6 +148,10 @@ export CRAYPE_LINK_TYPE=dynamic'''
         if already_ran.count((row['id'], hostname, args.method, args.num_nodes, args.ranks_per_node, args.basis)) >= args.max_repeats:
             continue
 
+        # Skip if too small
+        if args.min_size is not None and row['n_waters'] < args.min_size:
+            continue
+
         # Parse it as an ASE atoms object
         atoms = read(StringIO(row['xyz']), format='xyz')
         atoms.center()
@@ -158,6 +168,7 @@ export CRAYPE_LINK_TYPE=dynamic'''
                 'hostname': hostname,
                 'method': args.method,
                 'num_nodes': args.num_nodes,
+                'ranks_per_node': args.ranks_per_node,
                 'n_waters': row['n_waters'],
                 'basis': args.basis,
                 'ttm_energy': row['ttm_energy'],
