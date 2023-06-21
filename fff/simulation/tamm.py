@@ -1,7 +1,5 @@
-"""Interface to the Tensor Algebra for Many-body Methods (TAMM) library
-
-We are using TAMM to run CC and MP2 computations until the full interface to NWChemEx is available.
-"""
+"""Interface to the Tensor Algebra for Many-body Methods (TAMM) library"""
+import re
 import json
 import logging
 from pathlib import Path
@@ -33,7 +31,7 @@ class TAMMCalculator(FileIOCalculator):
             'coordinates': [],
             'units': 'bohr'
         }
-        positions_bohr = atoms.positions.copy() * units.Bohr
+        positions_bohr = atoms.positions.copy() / units.Bohr
         for sym, pos in zip(atoms.symbols, positions_bohr):
             coords = "\t".join(f"{x:.8f}" for x in pos)
             geometry['coordinates'].append(
@@ -58,9 +56,6 @@ class TAMMCalculator(FileIOCalculator):
 
         # Find the highest-level computation that has been performed
         output_json_dir = output_path / 'restricted' / 'json'
-        if not output_json_dir.exists():  # pragma: no cover
-            raise ValueError('No output JSONs found')
-
         output_jsons = list(output_json_dir.glob('*.json'))
         output_json = None
         for level in ['ccsd_t', 'ccsd', 'scf']:
@@ -71,20 +66,28 @@ class TAMMCalculator(FileIOCalculator):
             if output_json is not None:
                 break
 
-        if output_json is None:  # pragma: no cover
-            raise ValueError('No output file found')
+        if output_json is None:
+            # If none, assume this is an MP2 computation and read from the stdout
+            output = (output_path / '..' / 'tamm.out').read_text()
 
-        logging.info(f'Reading from {output_json}')
+            # Find the SCF energy
+            scf_energy_match = re.search(r'\*\* Total SCF energy =\s+([-\d\.]+)', output)
+            scf_energy = float(scf_energy_match.group(1))
 
-        # Read in the energy
-        with output_json.open() as fp:
-            output = json.load(fp)["output"]
-        if level == 'ccsd_t':
-            energy = output["CCSD(T)"]["(T)Energies"]["total"]
-        elif level == 'ccsd':
-            energy = output["CCSD"]["final_energy"]["total"]
-        elif level == "scf":
-            energy = output["SCF"]["final_energy"]
+            # Find the MP2 energy
+            mp2_energy_match = re.search(r'Closed-Shell MP2 energy / hartree:\s+([-\d\.]+)', output)
+            mp2_energy = float(mp2_energy_match.group(1))
+            energy = mp2_energy + scf_energy
         else:
-            raise NotImplementedError(f'No support for {level} yet')
-        self.results['energy'] = energy
+            # Read in the energy
+            with output_json.open() as fp:
+                output = json.load(fp)["output"]
+            if level == 'ccsd_t':
+                energy = output["CCSD(T)"]["(T)Energies"]["total"]
+            elif level == 'ccsd':
+                energy = output["CCSD"]["final_energy"]["total"]
+            elif level == "scf":
+                energy = output["SCF"]["final_energy"]
+            else:
+                raise NotImplementedError(f'No support for {level} yet')
+        self.results['energy'] = energy * units.Ha

@@ -1,0 +1,223 @@
+
+Date: Wed Jun 14 13:44:45 2023
+
+{
+  "geometry": {
+    "coordinates": [
+      "H    0.000000000000000   1.579252144093028   2.174611055780858",
+      "O    0.000000000000000   0.000000000000000   0.000000000000000",
+      "H    0.000000000000000   1.579252144093028  -2.174611055780858"
+    ],
+    "units": "bohr"
+  },
+  "basis": {
+    "basisset": "cc-pvdz",
+    "gaussian_type": "cartesian",
+    "atom_basis": null
+  },
+  "common": {
+    "maxiter": 100
+  },
+  "SCF": {
+    "tol_int": 1e-16,
+    "tol_lindep": 1e-06,
+    "conve": 1e-09,
+    "convd": 1e-08,
+    "diis_hist": 10,
+    "charge": 0,
+    "multiplicity": 1,
+    "scf_type": "restricted",
+    "sad": false,
+    "writem": 10,
+    "force_tilesize": false,
+    "tilesize": 30
+  },
+  "CD": {
+    "diagtol": 1e-12,
+    "max_cvecs": 40
+  },
+  "CC": {
+    "threshold": 1e-06,
+    "ndiis": 5,
+    "writet": false,
+    "ccsd_maxiter": 100,
+    "CCSD(T)": {
+      "ccsdt_tilesize": 40
+    },
+    "debug": false
+  }
+}
+
+Common Options
+{
+ maxiter    = 100
+ basis      = cc-pvdz cartesian
+ geom_units = bohr
+ debug      = false
+}
+
+Number of nodes, processes per node provided: 1, 1
+Number of nodes, processes per node used for SCF calculation: 1, 1
+
+SCF Options
+{
+ charge       = 0
+ multiplicity = 1
+ level shift  = 0
+ tol_int      = 1e-16
+ tol_lindep   = 1e-06
+ conve        = 1e-09
+ convd        = 1e-08
+ diis_hist    = 10
+ AO_tilesize  = 30
+ writem       = 10
+ scf_type     = restricted
+ restart_size = 2000
+ restart      = false
+ debug        = false
+}
+
+Number of basis functions = 25
+
+Total number of electrons = 10
+  # of alpha electrons    = 5
+  # of beta electons      = 5
+
+Nuclear repulsion energy  = 6.18328500301609
+
+# of {all,non-negligible} shell-pairs = {78,78}
+Number of AO tiles = 12
+
+Time for initial setup: 0.01 secs
+
+Time for computing 1-e integrals T, V, S: 0.00 secs
+Time for computing orthogonalizer: 0.00 secs
+
+pre-computing data for Schwarz bounds... 
+Time to compute schwarz matrix: 0.00 secs
+
+Projecting minimal basis SOAD onto basis set specified (cc-pvdz)
+Initial guess: 0.00 secs
+Total Time to compute initial guess: 0.01 secs
+
+
+ SCF iterations
+-----------------------------------------------------------------
+ Iter     Energy            E-Diff       RMSD          Time(s)
+-----------------------------------------------------------------
+   1  -75.7883336112    -7.58e+01     1.51e-02         0.0 
+   2  -75.8112223114    -2.29e-02     6.94e-03         0.0 
+   3  -75.8243320050    -1.31e-02     1.78e-03         0.0 
+   4  -75.8252616498    -9.30e-04     7.38e-04         0.0 
+   5  -75.8253464091    -8.48e-05     1.25e-04         0.0 
+   6  -75.8253488724    -2.46e-06     3.41e-05         0.0 
+   7  -75.8253490465    -1.74e-07     2.24e-05         0.0 
+   8  -75.8253490930    -4.65e-08     5.88e-06         0.0 
+   9  -75.8253490952    -2.22e-09     2.32e-07         0.0 
+  10  -75.8253490952    -7.11e-12     2.23e-08         0.0 
+  11  -75.8253490952    -8.53e-14     2.58e-09         0.0 
+
+** Total SCF energy = -75.8253490952104
+
+Nuclear repulsion energy = 6.183285003016088
+#electrons        = 9.999999999999993
+1e energy kinetic = 75.0776855023876664
+1e energy N-e     = -192.4304619879275151
+1e energy         = -117.3527764855398203
+2e energy         = 35.3441424169819101
+writing orbitals and density to file... done.
+
+Time taken for Hartree-Fock: 0.12 secs
+
+CCSD Options
+{
+ cache_size           = 8
+ ccsdt_tilesize       = 40
+ ndiis                = 5
+ threshold            = 1e-06
+ tilesize             = 40
+ ccsd_maxiter         = 100
+ freeze_core          = 0
+ freeze_virtual       = 0
+ itilesize            = 1000
+ readt                = false
+ writet               = false
+ writev               = false
+ writet_iter          = 5
+ profile_ccsd         = false
+ balance_tiles        = true
+ eom_nroots           = 1
+ eom_microiter        = 100
+ eom_threshold        = 1e-06
+ debug                = false
+}
+
+#occupied, #virtual = 10, 40
+
+Resetting CCSD tilesize to: 50
+
+CD Options
+{
+ debug            = false
+ diagtol          = 1e-12
+ write_vcount     = 5000
+ max_cvecs_factor = 24
+}
+
+-----------------------------------------------------
+Begin 2-index transformation ... 
+
+nAO, nMO, nelectrons = 25, 50, 10
+n_occ_alpha, n_vir_alpha, n_occ_beta, n_vir_beta = 5,20,5,20
+
+Time taken for Fao->Fmo transform: 0.00 secs
+
+-----------------------------------------------------
+Number of AO tiles = 12
+# of {all,non-negligible} shell-pairs = {78,78}
+
+    Begin Cholesky Decomposition
+---------------------------------------------
+- CPU memory required for computing cholesky vectors: 0.00 GiB
+
+- Time for computing the diagonal: 0.00 secs
+
+- Total number of cholesky vectors = 287
+
+- Time to compute cholesky vectors: 0.08 secs
+
+- CPU memory required for resizing the ao cholesky tensor: 0.00 GiB
+- CPU memory required for ao2mo transformation: 0.00 GiB
+- CPU memory required for the 2-step contraction: 0.01 GiB
+
+- Time for ao to mo transform: 0.01 secs
+
+    End Cholesky Decomposition
+---------------------------------------------
+
+Total Time taken for Cholesky Decomposition: 0.09 secs
+
+----------------------------
+scf_type = restricted
+Closed-Shell SCF
+nbf = 25
+nbf_orig = 25
+n_lindep = 0
+focc = 1
+nmo = 50
+nocc = 10
+nvir = 40
+n_occ_alpha = 5
+n_vir_alpha = 20
+n_occ_beta = 5
+n_vir_beta = 20
+nelectrons = 10
+nelectrons_alpha = 5
+nelectrons_beta = 5
+n_frozen_core = 0
+n_frozen_virtual = 0
+----------------------------
+CPU memory required for MP2 calculation: 0.00 GiB
+Closed-Shell MP2 energy / hartree: -0.245194254539253
+Time to compute MP2 energy: 0.00 secs
+
