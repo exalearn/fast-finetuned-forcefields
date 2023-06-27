@@ -35,6 +35,10 @@ jobs:
         ./get-ttm.sh
         pip install -e .
         cd ..
+    - name: Install NWChem
+      run: |
+        sudo apt update
+        sudo apt install -y nwchem
     - name: Lint with flake8
       run: |
         pip install flake8
