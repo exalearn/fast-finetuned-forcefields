@@ -41,20 +41,37 @@ def run_nwchem(atoms, basis, nodes, ranks_per_node, twostep: bool, walltime=None
     if twostep:
         new_opts = {
             'pretasks': [{
-                'basis': "aug-cc-pvdz",
-                "theory": "scf",
-                'set': {
-                    'quickguess': 't',
-                    'fock:densityscreen': 'f',
-                    'lindep:n_dep': 0,
-            }}, {
-                'basis': basis,
-                "theory": "scf",
-                'set': {
-                    'quickguess': 't',
-                    'fock:densityscreen': 'f',
-                    'lindep:n_dep': 0,
-            }}]
+            'theory': 'dft',
+            'dft': {
+                'xc': 'hfexch',
+                # 'convergence': {  # TODO (wardlt): Explore if there is a better value for the convergence
+                #     'energy': '1d-12',
+                #     'gradient': '5d-19'
+                # },
+                # 'tolerances': {'acccoul': 15},
+                'maxiter': 50,
+            },
+            'set': {
+                'quickguess': 't',
+                'fock:densityscreen': 'f',
+                'lindep:n_dep': 0,
+            }
+        }],
+            # 'pretasks': [{
+            #     'basis': "aug-cc-pvdz",
+            #     "theory": "scf",
+            #     'set': {
+            #         'quickguess': 't',
+            #         'fock:densityscreen': 'f',
+            #         'lindep:n_dep': 0,
+            # }}, {
+            #     'basis': basis,
+            #     "theory": "scf",
+            #     'set': {
+            #         'quickguess': 't',
+            #         'fock:densityscreen': 'f',
+            #         'lindep:n_dep': 0,
+            # }}]
         }
 
     with TemporaryDirectory(dir='/pscratch/sd/w/wardlt/nwchem-bench/') as tmpdir:
