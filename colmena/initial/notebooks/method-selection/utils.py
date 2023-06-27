@@ -7,7 +7,7 @@ import numpy as np
 import json
 
 
-def assess_against_holdout(runs: Path, tags: list[str]) -> pd.DataFrame:
+def assess_against_holdout(runs: list[Path], tags: list[str]) -> pd.DataFrame:
     """Gather the model performance on a hold-out set of molecular energies and forces
     
     Args:
@@ -20,7 +20,7 @@ def assess_against_holdout(runs: Path, tags: list[str]) -> pd.DataFrame:
     for run in runs:
         # Get the energy tolerance of my run
         params = json.loads((run / 'runparams.json').read_text())
-        
+
         # Load in the duplicates
         duplicates = json.loads((run / 'duplicates.json').read_text())
 
@@ -33,7 +33,7 @@ def assess_against_holdout(runs: Path, tags: list[str]) -> pd.DataFrame:
                 dup_data['run'] = duplicate
                 dup_data['energy_error_per_atom'] = dup_data['energy_error_per_atom'].abs() * 1000
                 dup_data['energy_error_per_atom-init'] = dup_data['energy_error_per_atom-init'].abs() * 1000
-                
+
                 eval_data.append(dup_data)
             except FileNotFoundError:
                 print(f'Could not assess {duplicate} for {run}')
@@ -54,7 +54,7 @@ def assess_against_holdout(runs: Path, tags: list[str]) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
-def assess_from_mctbp_runs(runs: Path, tags: list[str]) -> pd.DataFrame:
+def assess_from_mctbp_runs(runs: list[Path], tags: list[str]) -> pd.DataFrame:
     """Gather model performance from when it was used to perform MCTBP sampling
     
     Args:
@@ -67,8 +67,7 @@ def assess_from_mctbp_runs(runs: Path, tags: list[str]) -> pd.DataFrame:
     for run in runs:
         # Get the energy tolerance of my run
         params = json.loads((run / 'runparams.json').read_text())
-        energy_tol = params['energy_tolerance']
-        
+
         # Load in the duplicates
         duplicates = json.loads((run / 'duplicates.json').read_text())
 
@@ -102,7 +101,6 @@ def assess_from_mctbp_runs(runs: Path, tags: list[str]) -> pd.DataFrame:
 
         data.append(record)
 
-        
     return pd.DataFrame(data)
 
 
@@ -110,7 +108,7 @@ def summarize_mctbp_results(run: Path) -> pd.DataFrame:
     """Get the energy and force errors from the MCTBP run
     
     Args:
-        path: Run directory
+        run: Run directory
     Returns:
         Dictionary containing the energy MAE (per atom) and Force RMSD
     """
@@ -125,35 +123,43 @@ def summarize_mctbp_results(run: Path) -> pd.DataFrame:
     for c in ['target_forces', 'ml_forces']:
         data[c] = data[c].apply(json.loads).apply(np.array)
     data['force_error'] = (data['target_forces'] - data['ml_forces']).apply(lambda x: np.linalg.norm(x, axis=1)).apply(lambda x: np.sqrt((x ** 2).sum()))
-    
+
     # Store the max force for each frame
     data['max_force'] = data['target_forces'].apply(lambda x: np.linalg.norm(x, axis=1).max())
-    
+
     return data
 
 
-def summarize_md_results(run: Path, timestep: float = 0.2) -> pd.DataFrame:
+def summarize_md_results(run: Path, tags: list[str] = (), timestep: float = 0.2) -> pd.DataFrame:
     """Load the results of the MD runs performed using the surrogate model as the output
     
     Args:
         run: Path to the Colmena run output files
+        tags: List of data to extract from run parameters
+        timestep: Time per timestep
     Returns:
         Dataframe containing the errors associated which each MD test for this run
     """
-    
+
     md_runs = run.glob('md-*')
     output = []
     for md_run in md_runs:
         data = pd.read_csv(md_run / 'sampled.csv')
         data['run'] = md_run.parent
-        
+        data['name'] = run.parent.name
+
+        # Get the metadata
+        config = json.loads((run / '..' / 'runparams.json').read_text())
+        for t in tags:
+            data[t] = config[t]
+
         # Get the real time for each
         config = json.loads((md_run / 'params.json').read_text())
         data['time'] = config['md_log_frequency'] * data['minimum_num'] * timestep
-        
+
         # Count the atoms
         data['n_atoms'] = data['xyz'].apply(lambda x: read_from_string(x, 'xyz')).apply(len)
-        
+
         # Compute the errors
         data['energy_error_per_atom'] = (data['target_energy'] - data['ml_energy']).abs() / data['n_atoms']
         for c in ['target_energy', 'ml_energy']:
@@ -161,6 +167,7 @@ def summarize_md_results(run: Path, timestep: float = 0.2) -> pd.DataFrame:
         for c in ['target_forces', 'ml_forces']:
             data[c] = data[c].apply(json.loads).apply(np.array)
         data['force_error'] = [x - y for x, y in zip(data['target_forces'], data['ml_forces'])]
+        data['force_rmse'] = [np.sqrt(np.mean(np.linalg.norm(x, axis=-1))) for x in data['force_error']]
 
         output.append(data)
     return pd.concat(output, ignore_index=True)
