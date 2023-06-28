@@ -1,7 +1,10 @@
 """Collections of Python functions for generating new training data"""
 from concurrent.futures import ProcessPoolExecutor
-from tempfile import TemporaryDirectory
+from tempfile import gettempdir
 from typing import Optional
+from hashlib import sha256
+from pathlib import Path
+import shutil
 
 from ase.calculators.calculator import Calculator, FileIOCalculator
 from ase.calculators.psi4 import Psi4
@@ -60,7 +63,19 @@ def _run_calculator(xyz: str, calc: Calculator | dict, temp_path: Optional[str] 
 
     # Parse the atoms object
     atoms = read_from_string(xyz, 'xyz')
-    with TemporaryDirectory(dir=temp_path, prefix='fff') as temp_dir:
+
+    # Make the run directory with a name defined by the XYZ and run parameters
+    run_hasher = sha256()
+    run_hasher.update(xyz.encode())
+    if isinstance(calc, dict):
+        run_hasher.update(str(calc).encode())
+    else:
+        run_hasher.update(str(calc.parameters).encode())
+    temp_dir = Path(temp_path or gettempdir()) / f'fff-{run_hasher.hexdigest()[-8:]}'
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_dir = str(temp_dir)  # ASE works with strings, not Path objects
+
+    try:
         # Special case for Psi4 which sets the run directory on creating the object
         if isinstance(calc, dict):
             calc = calc.copy()
@@ -80,3 +95,5 @@ def _run_calculator(xyz: str, calc: Calculator | dict, temp_path: Optional[str] 
 
         # Convert it to JSON
         return write_to_string(atoms, 'json')
+    finally:
+        shutil.rmtree(temp_dir)

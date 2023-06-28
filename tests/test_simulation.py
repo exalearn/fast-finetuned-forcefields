@@ -82,7 +82,7 @@ def test_async(atoms, tmpdir):
     assert np.isclose(result, async_result).all()
 
 
-def test_nwchem(atoms, tmpdir):
+def test_nwchem(atoms):
     """Test NWChem with rank replacement"""
 
     nwchem = NWChem(theory='scf', basis='3-21g', command='mpirun -np FFF_TOTAL_RANKS nwchem PREFIX.nwi > PREFIX.nwo')
