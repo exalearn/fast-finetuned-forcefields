@@ -4,32 +4,31 @@ It is presently hard-coded to run on Cori KNL nodes. You will need to change the
  the NWChem executable path, and the NWChem memory/core settings to adapt to a different system
 """
 
+import json
+import zipfile
 from argparse import ArgumentParser
+from concurrent.futures import as_completed
+from io import TextIOWrapper, StringIO
 from pathlib import Path
 from typing import Iterable, Tuple, Optional
-from concurrent.futures import as_completed
-import json
 
+import ase
 import pandas as pd
+import parsl
+from ase.calculators.nwchem import NWChem
+from ase.db import connect
+from ase.io import read
 from parsl.dataflow.futures import AppFuture
 from parsl.executors import HighThroughputExecutor
 from parsl.launchers import SimpleLauncher
 from parsl.providers import SlurmProvider
-from ase.calculators.nwchem import NWChem
-from ase.db import connect
-from ase.io import read
-from io import TextIOWrapper, StringIO
 from tqdm import tqdm
-import zipfile
-import ase
-
-import parsl
 
 # Compute node information (settings for Cori KNL)
-cores_per_node = 68
-memory_per_node = 90  # In GB
-scratch_path = '/global/cscratch1/sd/wardlt/nwchem-bench/'
-disk_space = 1700 # In GB
+cores_per_node = 128
+memory_per_node = 500  # In GB
+scratch_path = '/global/cscratch1/sd/wardlt/nwchem-bench/'  # Fix
+disk_space = 1700  # In GB
 
 
 @parsl.python_app
@@ -43,17 +42,19 @@ def run_nwchem(atoms: ase.Atoms, calc: NWChem, temp_path: Optional[str] = None) 
     Returns:
         Atoms after the calculation
     """
-    from tempfile import mkdtemp
+    from tempfile import gettempdir
+    from hashlib import sha256
     from shutil import rmtree
+    from pathlib import Path
     import time
     import os
 
-    temp_dir = mkdtemp(dir=temp_path, prefix='nwc')
-    
-    # Execute from the temp so that the nwchem.nwi doesn't overwrite another's
-    os.chdir(temp_dir)
+    # Make a run directory based on the input XYZ
+    run_hash = sha256(str(atoms).encode()).hexdigest()[-8]
+    temp_dir = Path(temp_path or gettempdir()) / f'fff-{run_hash}'
 
     # Update the scratch directory
+    calc.directory = str(temp_dir)
     calc.scratch = str(temp_dir)
     calc.perm = str(temp_dir)
 
@@ -62,7 +63,8 @@ def run_nwchem(atoms: ase.Atoms, calc: NWChem, temp_path: Optional[str] = None) 
     atoms.set_calculator(calc)
     atoms.get_forces()
     run_time = time.perf_counter() - start_time
-    
+
+    # Remove only if exiting successfully
     rmtree(temp_dir)
 
     return atoms, run_time
@@ -90,7 +92,7 @@ if __name__ == "__main__":
     parser.add_argument('--num-nodes', default=4, help='Number of nodes for each NWChem computation', type=int)
     parser.add_argument('--num-parallel', default=1, help='Number of NWChem computations to run in parallel', type=int)
     parser.add_argument('--basis', default='aug-cc-pvdz', help='Basis set to use for all atoms')
-    parser.add_argument('--max-to-run', default=None, type=int, help='Maximum number of tasks to run')
+    parser.add_argument('--max-size', default=None, type=int, help='Maximum size of cluster to run')
     parser.add_argument('--temp-dir', default=None, help='Where to store the temporary files')
     parser.add_argument('--structures', default='data/initial_MP2.zip', help='Path of initial structures to use')
     args = parser.parse_args()
@@ -112,12 +114,12 @@ if __name__ == "__main__":
     ranks_per_node = cores_per_node
     integral_caching = {
         # Disk space is in 8byte words per process. I put the 32 so that we temporarily use more scratch than allowed
-        'filesize': 32 * (disk_space * 1024 ** 2)  // 8 // (ranks_per_node * args.num_nodes * args.num_parallel)
+        'filesize': 32 * (disk_space * 1024 ** 2) // 8 // (ranks_per_node * args.num_nodes * args.num_parallel)
     }
     # Disk size is in MB per process
     disk_per_mp2 = 32 * (disk_space * 1024) // (ranks_per_node * args.num_nodes * args.num_parallel)
     calc = NWChem(
-        memory=f'{0.8 * memory_per_node / ranks_per_node:.1f} gb',
+        memory=f'{memory_per_node / ranks_per_node:.1f} gb',
         basis={'*': args.basis},
         basispar='spherical',
         set={
@@ -137,16 +139,12 @@ if __name__ == "__main__":
         },
         mp2={'freeze': 'atomic', 'scratchdisk': disk_per_mp2},
         theory='mp2',
+        restart_kw='restart',
         pretasks=[{
             'theory': 'dft',
             'dft': {
                 'semidirect': integral_caching,
                 'xc': 'hfexch',
-                # 'convergence': {  # TODO (wardlt): Explore if there is a better value for the convergence
-                #     'energy': '1d-12',
-                #     'gradient': '5d-19'
-                # },
-                # 'tolerances': {'acccoul': 15},
                 'maxiter': 50,
             },
             'set': {
@@ -160,6 +158,7 @@ if __name__ == "__main__":
                  f'--ntasks={ranks_per_node * args.num_nodes} '
                  f'--export=ALL,OMP_NUM_THREADS={1} '
                  f'--ntasks-per-node={ranks_per_node} '
+                 # Note: Parsl sets --ntasks-per-node=1 in #SBATCH. For some reason, --ntasks in srun overrides it
                  '--cpu-bind=cores shifter nwchem PREFIX.nwi > PREFIX.nwo'),
     )
 
@@ -171,35 +170,33 @@ if __name__ == "__main__":
             label='launch_from_mpi_nodes',
             max_workers=args.num_parallel,
             cores_per_worker=1e-6,
-            start_method='fork',
+            start_method='thread',
             provider=SlurmProvider(
-                partition='regular',
-                account='m1513',
+                partition=None,  # 'debug'
+                account='m3196',
                 launcher=SimpleLauncher(),
-                walltime='48:00:00',
+                walltime='12:00:00',
                 nodes_per_block=args.num_nodes * args.num_parallel,
                 init_blocks=1,
                 min_blocks=0,
                 max_blocks=1,  # Maximum number of jobs
-                scheduler_options='#SBATCH --image=ghcr.io/nwchemgit/nwchem-702.mpipr.nersc:latest\n#SBATCH -C knl',
-                worker_init=f'''
-#module load python
-#conda activate /global/project/projectdirs/m1513/lward/fast-finedtuned-forcefields/env
+                scheduler_options='''#SBATCH --image=ghcr.io/nwchemgit/nwchem-720.nersc.mpich4.mpi-pr:latest
+#SBATCH -C cpu
+#SBATCH --qos=regular''',
+                worker_init='''
+module load python
+conda activate /global/cfs/cdirs/m1513/lward/fast-finedtuned-forcefields/env-cpu/
 
-module swap craype-{{${{CRAY_CPU_TARGET}},mic-knl}}
-export OMP_NUM_THREADS=1
-export MPICH_GNI_MAX_EAGER_MSG_SIZE=131026
-export MPICH_GNI_NUM_BUFS=80
-export MPICH_GNI_NDREG_MAXSIZE=16777216
-export MPICH_GNI_MBOX_PLACEMENT=nic
-export MPICH_GNI_RDMA_THRESHOLD=65536
 export COMEX_MAX_NB_OUTSTANDING=6
+export FI_CXI_RX_MATCH_MODE=hybrid
+export COMEX_EAGER_THRESHOLD=16384
+export FI_CXI_RDZV_THRESHOLD=16384
+export FI_CXI_OFLOW_BUF_COUNT=6
+export MPICH_SMP_SINGLE_COPY_MODE=CMA
 
 which python
-which process_worker_pool.py 
 hostname
-pwd
-                    ''',
+pwd''',
                 cmd_timeout=1200,
             ),
         )]
@@ -212,6 +209,10 @@ pwd
         # Submit structures to Parsl
         futures = []
         for filename, atoms in strc_iter:
+            # Skip if structure is too larger
+            if len(atoms) // 3 > args.max_size:
+                continue
+
             # Store some tracking information
             atoms.info['filename'] = filename
             atoms.info['basis'] = args.basis
@@ -226,10 +227,6 @@ pwd
             # Submit the calculation to run
             future = run_nwchem(atoms, calc, temp_path=scratch_path)
             futures.append(future)
-
-            # Check if the total
-            if args.max_to_run is not None and len(futures) >= args.max_to_run:
-                break
     print(f'Submitted {len(futures)}. {n_skipped} were already complete')
 
     # Loop over the futures and store them if the complete
@@ -247,7 +244,7 @@ pwd
             continue
         atoms, runtime = future.result()
 
-        # Store it (open a new connect each time so we ensure results are written
+        # Store it (open a new connect each time to ensure results are written)
         with connect('initial.db', type='db') as db:
             db.write(atoms, **atoms.info, runtime=runtime)
     if n_failures > 0:
