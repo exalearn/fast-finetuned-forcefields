@@ -24,10 +24,10 @@ from parsl.launchers import SimpleLauncher
 from parsl.providers import SlurmProvider
 from tqdm import tqdm
 
-# Compute node information (settings for Cori KNL)
+# Compute node information (settings for Perlmutter CPU)
 cores_per_node = 128
 memory_per_node = 500  # In GB
-scratch_path = '/global/cscratch1/sd/wardlt/nwchem-bench/'  # Fix
+scratch_path = '/pscratch/sd/w/wardlt/nwchem-db/'  # Fix
 disk_space = 1700  # In GB
 
 
@@ -50,8 +50,10 @@ def run_nwchem(atoms: ase.Atoms, calc: NWChem, temp_path: Optional[str] = None) 
     import os
 
     # Make a run directory based on the input XYZ
-    run_hash = sha256(str(atoms).encode()).hexdigest()[-8]
+    run_hash = sha256(atoms.positions.tobytes()).hexdigest()[-8:]
     temp_dir = Path(temp_path or gettempdir()) / f'fff-{run_hash}'
+    if (temp_dir / 'nwchem.db').exists():
+        calc.parameters['restart_kw'] = 'restart'
 
     # Update the scratch directory
     calc.directory = str(temp_dir)
@@ -91,6 +93,7 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument('--num-nodes', default=4, help='Number of nodes for each NWChem computation', type=int)
     parser.add_argument('--num-parallel', default=1, help='Number of NWChem computations to run in parallel', type=int)
+    parser.add_argument('--num-jobs', default=1, help='Number of jobs to run', type=int)
     parser.add_argument('--basis', default='aug-cc-pvdz', help='Basis set to use for all atoms')
     parser.add_argument('--max-size', default=None, type=int, help='Maximum size of cluster to run')
     parser.add_argument('--temp-dir', default=None, help='Where to store the temporary files')
@@ -112,12 +115,6 @@ if __name__ == "__main__":
 
     # Make the NWChem calculator
     ranks_per_node = cores_per_node
-    integral_caching = {
-        # Disk space is in 8byte words per process. I put the 32 so that we temporarily use more scratch than allowed
-        'filesize': 32 * (disk_space * 1024 ** 2) // 8 // (ranks_per_node * args.num_nodes * args.num_parallel)
-    }
-    # Disk size is in MB per process
-    disk_per_mp2 = 32 * (disk_space * 1024) // (ranks_per_node * args.num_nodes * args.num_parallel)
     calc = NWChem(
         memory=f'{memory_per_node / ranks_per_node:.1f} gb',
         basis={'*': args.basis},
@@ -135,15 +132,12 @@ if __name__ == "__main__":
         scf={
             'maxiter': 99,
             'tol2e': '1d-15',
-            'semidirect': integral_caching,
         },
-        mp2={'freeze': 'atomic', 'scratchdisk': disk_per_mp2},
+        mp2={'freeze': 'atomic'},
         theory='mp2',
-        restart_kw='restart',
         pretasks=[{
             'theory': 'dft',
             'dft': {
-                'semidirect': integral_caching,
                 'xc': 'hfexch',
                 'maxiter': 50,
             },
@@ -165,24 +159,24 @@ if __name__ == "__main__":
     # Make the Parsl configuration
     config = parsl.Config(
         app_cache=False,  # No caching needed
-        retries=0,  # Will restart a job if it fails for any reason
+        retries=1,  # Will restart a job if it fails for any reason
         executors=[HighThroughputExecutor(
             label='launch_from_mpi_nodes',
-            max_workers=args.num_parallel,
+            max_workers=args.num_parallel // args.num_jobs,
             cores_per_worker=1e-6,
             start_method='thread',
             provider=SlurmProvider(
                 partition=None,  # 'debug'
                 account='m3196',
                 launcher=SimpleLauncher(),
-                walltime='12:00:00',
-                nodes_per_block=args.num_nodes * args.num_parallel,
-                init_blocks=1,
+                walltime='24:00:00',
+                nodes_per_block=args.num_nodes * args.num_parallel // args.num_jobs,
+                init_blocks=args.num_jobs,
                 min_blocks=0,
-                max_blocks=1,  # Maximum number of jobs
+                max_blocks=args.num_jobs,  # Maximum number of jobs
                 scheduler_options='''#SBATCH --image=ghcr.io/nwchemgit/nwchem-720.nersc.mpich4.mpi-pr:latest
 #SBATCH -C cpu
-#SBATCH --qos=regular''',
+#SBATCH --qos=preempt''',
                 worker_init='''
 module load python
 conda activate /global/cfs/cdirs/m1513/lward/fast-finedtuned-forcefields/env-cpu/
