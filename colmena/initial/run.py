@@ -20,15 +20,16 @@ from colmena.models import Result
 from colmena.queue import ColmenaQueues
 from colmena.queue.redis import RedisQueues
 from colmena.thinker import BaseThinker, event_responder, result_processor, ResourceCounter, task_submitter
-from colmena.task_server.funcx import FuncXTaskServer
-from funcx import FuncXClient
+from colmena.task_server.globus import GlobusComputeTaskServer
+from globus_compute_sdk import Client as GCClient
 import proxystore as ps
 import numpy as np
 import torch
-from proxystore.store import register_store
-from proxystore.store.file import FileStore
-from proxystore.store.globus import GlobusStore, GlobusEndpoints
-from proxystore.store.redis import RedisStore
+from proxystore.connectors.file import FileConnector
+from proxystore.connectors.globus import GlobusConnector
+from proxystore.connectors.redis import RedisConnector
+from proxystore.store import register_store, Store
+from proxystore.store.globus import GlobusEndpoints
 from proxystore.store.utils import get_key
 
 from fff.learning.gc.ase import SchnetCalculator
@@ -129,6 +130,7 @@ class Thinker(BaseThinker):
             n_to_run: int,
             n_models: int,
             n_qc_workers: int,
+            n_sampling_workers: int,
             queue_length: int,
             queue_tolerance: float,
             retrain_freq: int,
@@ -157,7 +159,7 @@ class Thinker(BaseThinker):
         """
         # Make the resource tracker
         #  For now, we only control resources over how many samplers are run at a time
-        rec = ResourceCounter(n_qc_workers, ['sample', 'simulate'])
+        rec = ResourceCounter(n_qc_workers + n_sampling_workers, ['sample', 'simulate'])
         super().__init__(queues, resource_counter=rec)
 
         # Save key configuration
@@ -178,6 +180,12 @@ class Thinker(BaseThinker):
         self.queue_length = queue_length
         self.queue_tolerance = queue_tolerance
         self.max_force = max_force
+
+        # Determine where we are running the
+        self.sampling_on_qc_workers = n_sampling_workers > 0
+        self.n_sampling_workers = n_sampling_workers
+        if self.sampling_on_qc_workers:
+            self.logger.info(f'Running sampling on {self.n_sampling_workers} separate workers')
 
         # Load in the search space
         self.search_space_lock: Lock = Lock()
@@ -237,7 +245,12 @@ class Thinker(BaseThinker):
 
         # Initialize the system settings
         self.start_training.set()  # Start by training the model
-        self.rec.reallocate(None, 'sample', n_qc_workers)  # Start with all devoted to sampling
+        if self.sampling_on_qc_workers:
+            self.rec.reallocate(None, 'sample', n_qc_workers)  # Start with all devoted to sampling
+        else:
+            # Partition workers to sampling and simulation
+            self.rec.reallocate(None, 'sample', self.n_sampling_workers)
+            self.rec.reallocate(None, 'simulate', n_qc_workers)
 
     @event_responder(event_name='start_training')
     def train_models(self):
@@ -410,7 +423,7 @@ class Thinker(BaseThinker):
         self.logger.info('TIMING - Finish submit_sampler')
 
     def _log_queue_sizes(self):
-        """Log the size fo the result queues"""
+        """Log the size of the result queues"""
         self.logger.info(f'Queue sizes - Audit: {len(self.task_queue_audit)}, Active: {len(self.task_queue_active)}')
 
     @result_processor(topic='sample')
@@ -421,14 +434,18 @@ class Thinker(BaseThinker):
         traj_id = result.task_info['traj_id']
         self.logger.info(f'Received sampling result for trajectory {traj_id}. Success: {result.success}')
 
-        # Determine whether we should re-allocate resources
+        # Determine whether we should continue sampling
         if len(self.task_queue_audit) > self.queue_length * (1 + self.queue_tolerance) and \
                 self.rec.allocated_slots('sample') > 0 and \
                 not self.reallocating.is_set() and \
                 not self.done.is_set():
             self.reallocating.set()
-            self.logger.info('We have enough sampling tasks, reallocating resources to simulation')
-            self.rec.reallocate('sample', 'simulate', 1, block=False, callback=self.reallocating.clear)
+            if self.sampling_on_qc_workers:
+                self.logger.info('We have enough sampling tasks, reallocating resources to simulation')
+                self.rec.reallocate('sample', 'simulate', 1, block=False, callback=self.reallocating.clear)
+            else:
+                self.logger.info('We have enough sampling task, reallocating resources to simulation')
+                self.rec.reallocate('sample', None, self.n_sampling_workers, block=False, callback=self.reallocating.clear)
         self.rec.release('sample', 1)
 
         # If successful, submit the structures for auditing
@@ -524,8 +541,6 @@ class Thinker(BaseThinker):
 
         Once all models from an inference batch have completed, check if all were successful.
         Once enough inference batches have completed successfully, pick the next round of tasks"""
-
-        self.logger.info('TIMING - Start collect_inference')
         # Get the batch information
         infer_id = result.task_info['infer_id']
         model_id = result.task_info['model_id']
@@ -587,8 +602,6 @@ class Thinker(BaseThinker):
         _get_proxy_stats(proxy, result)
         with open(self.out_dir / 'inference-results.json', 'a') as fp:
             print(result.json(exclude={'value', 'inputs'}), file=fp)
-
-        self.logger.info('TIMING - Finish collect_inference')
 
     def _select_structures(self, structures: list[ase.Atoms], energies: np.ndarray, traj_ids: list[int]) \
             -> list[SimulationTask]:
@@ -653,8 +666,6 @@ class Thinker(BaseThinker):
     @task_submitter(task_type="simulate")
     def submit_simulation(self):
         """Submit a new simulation to check results from sampling/gather new training data"""
-        self.logger.info('TIMING - Start submit_simulation')
-
         # Get a simulation to run
         to_run = None
         task_type = None
@@ -702,14 +713,18 @@ class Thinker(BaseThinker):
         traj_id = result.task_info['traj_id']
         self.logger.info(f'Received a simulation from trajectory {traj_id}. Success: {result.success}')
 
-        # Reallocate resources if the task queue is getting too small
+        # Adjust resources if queue is too small
         if len(self.task_queue_audit) <= self.queue_length * (1 - self.queue_tolerance) and \
                 self.rec.allocated_slots('simulate') > 0 and \
                 not self.reallocating.is_set() and \
                 not self.done.is_set():
-            self.reallocating.set()
-            self.logger.info('Running low on simulation tasks. Reallocating to sampling')
-            self.rec.reallocate('simulate', 'sample', 1, block=False, callback=self.reallocating.clear)
+            if self.sampling_on_qc_workers:
+                self.reallocating.set()
+                self.logger.info('Running low on simulation tasks. Reallocating to sampling')
+                self.rec.reallocate('simulate', 'sample', 1, block=False, callback=self.reallocating.clear)
+            else:
+                self.logger.info('Running low on simulation tasks. Restarting sampling')
+                self.rec.reallocate(None, 'sample', self.n_sampling_workers)  # Should complete immediately
         self.rec.release('simulate', 1)
 
         # Store the result in the database if successful
@@ -805,6 +820,8 @@ if __name__ == '__main__':
     group.add_argument("--ml-endpoint", help='FuncX endpoint ID for model training and interface')
     group.add_argument("--qc-endpoint", help='FuncX endpoint ID for quantum chemistry')
     group.add_argument("--num-qc-workers", type=int, help="Number of workers performing chemistry tasks")
+    group.add_argument("--num-sampling-workers", type=int, default=0, help="If >0, sampling tasks run on this many GPU workers. "
+                                                                           "If 0, they run on the same CPU resources as ")
     group.add_argument("--parsl", action='store_true', help='Use Parsl instead of FuncX')
     group.add_argument("--parsl-site", default='theta-venti', help='Which configuration to use for Parsl')
 
@@ -940,16 +957,16 @@ if __name__ == '__main__':
     ps_backends = {args.simulate_ps_backend, args.sample_ps_backend, args.train_ps_backend}
     logger.info(f'Initializing ProxyStore backends: {ps_backends}')
     if 'redis' in ps_backends:
-        store = RedisStore(name='redis', hostname=args.redishost, port=args.redisport, stats=True)
+        store = Store(name='redis', connector=RedisConnector(hostname=args.redishost, port=args.redisport), metrics=True)
         register_store(store)
     if 'file' in ps_backends:
-        store = FileStore(name='file', store_dir=str(ps_file_dir.absolute()), stats=True)
+        store = Store(name='file', connector=FileConnector(store_dir=str(ps_file_dir.absolute())), metrics=True)
         register_store(store)
     if 'globus' in ps_backends:
         if args.ps_globus_config is None:
             raise ValueError('Must specify --ps-globus-config to use the Globus ProxyStore backend')
         endpoints = GlobusEndpoints.from_json(args.ps_globus_config)
-        store = GlobusStore(name='globus', endpoints=endpoints, stats=True, timeout=600)
+        store = Store(name='globus', connector=GlobusConnector(endpoints=endpoints, timeout=600), metrics=True)
         register_store(store)
     ps_names = {'simulate': args.simulate_ps_backend, 'sample': args.sample_ps_backend,
                 'train': args.train_ps_backend, 'infer': args.train_ps_backend}
@@ -998,9 +1015,18 @@ if __name__ == '__main__':
     else:
         raise ValueError(f'Sampling method not supported: {args.sampling_method}')
 
+    if args.num_sampling_workers > 0:  # Run sampling on GPU if sampling workers are used
+        sampler_kwargs['device'] = 'cuda'
     my_run_dynamics = _wrap(sampler.run_sampling, **sampler_kwargs)
 
     # Create the task server
+    cpu_methods = [my_run_simulation]
+    gpu_methods = [my_train_schnet, my_eval_schnet]
+    if args.num_qc_workers > 0:
+        gpu_methods.append(my_run_dynamics)
+    else:
+        cpu_methods.append(my_run_dynamics)
+
     if args.parsl:
         import config as parsl_configs
         from colmena.task_server import ParslTaskServer
@@ -1012,16 +1038,16 @@ if __name__ == '__main__':
             methods = [my_train_schnet, my_eval_schnet, my_run_dynamics, my_run_simulation]
         else:
             # Assign tasks to the appropriate executor
-            methods = [(f, {'executors': ['gpu']}) for f in [my_train_schnet, my_eval_schnet]]
-            methods.extend([(f, {'executors': ['cpu']}) for f in [my_run_simulation, my_run_dynamics]])
+            methods = [(f, {'executors': ['gpu']}) for f in gpu_methods]
+            methods.extend([(f, {'executors': ['cpu']}) for f in cpu_methods])
 
         # Create the server
         doer = ParslTaskServer(methods, queues, config)
     else:
-        fx_client = FuncXClient()  # Authenticate with FuncX
-        task_map = dict((f, args.ml_endpoint) for f in [my_train_schnet, my_eval_schnet])
-        task_map.update(dict((f, args.qc_endpoint) for f in [my_run_simulation, my_run_dynamics]))
-        doer = FuncXTaskServer(task_map, fx_client, queues)
+        fx_client = GCClient()  # Authenticate with FuncX
+        task_map = dict((f, args.ml_endpoint) for f in gpu_methods)
+        task_map.update(dict((f, args.qc_endpoint) for f in cpu_methods))
+        doer = GlobusComputeTaskServer(task_map, fx_client, queues)
 
     # Create the thinker
     thinker = Thinker(
@@ -1035,6 +1061,7 @@ if __name__ == '__main__':
         n_to_run=args.num_to_run,
         n_models=args.ensemble_size,
         n_qc_workers=args.num_qc_workers,
+        n_sampling_workers=args.num_sampling_workers,
         energy_tolerance=args.energy_tolerance,
         min_run_length=args.min_run_length,
         max_run_length=args.max_run_length,
