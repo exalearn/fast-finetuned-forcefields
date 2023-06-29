@@ -5,8 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from random import shuffle, sample
 from pathlib import Path
-from typing import Dict, Any, Optional, NamedTuple
-from dataclasses import asdict
+from typing import Dict, Optional, NamedTuple
 import hashlib
 import logging
 import argparse
@@ -90,24 +89,6 @@ class SimulationTask:
     traj_id: int  # Which trajectory this came from
     ml_eng: float  # Energy predicted from machine learning model
     ml_std: Optional[float] = None  # Uncertainty of the model
-
-
-def _get_proxy_stats(obj: Any, result: Result):
-    """Update a Result object with the proxy stats of its result
-    Should be run after using the result and just before saving the output
-    Args:
-        obj: Pointer to value of the result before resolution
-        result: Result object to be updated with proxy stats and Globus transfer ID, if available
-    """
-
-    if isinstance(obj, ps.proxy.Proxy):
-        store = ps.store.get_store(obj)
-
-        # Store the resolution stats
-        if store.has_stats:
-            stats = store.stats(obj)
-            stats = dict((k, asdict(v)) for k, v in stats.items())
-            result.task_info['result_proxy_stats'] = stats
 
 
 class Thinker(BaseThinker):
@@ -255,7 +236,6 @@ class Thinker(BaseThinker):
     @event_responder(event_name='start_training')
     def train_models(self):
         """Submit the models to be retrained"""
-        self.logger.info('TIMING - Start train_models')
         self.training_complete.clear()
         self.training_round += 1
         self.logger.info(f'Started training batch {self.training_round}')
@@ -304,12 +284,10 @@ class Thinker(BaseThinker):
                 }
             )
             self.training_incomplete += 1
-        self.logger.info('TIMING - Finish train_models')
 
     @result_processor(topic='train')
     def store_models(self, result: Result):
         """Store a model once it finishes updating"""
-        self.logger.info('TIMING - Start store_models')
         model_id = result.task_info["model_id"]
         self.logger.info(f'Received result from model {model_id}. Success: {result.success}')
 
@@ -357,9 +335,6 @@ class Thinker(BaseThinker):
                     self.inference_ready.set()
                     self.logger.info('Inference is now eligible to start')
 
-        # Access the proxy timing information of the result
-        _get_proxy_stats(proxy, result)
-
         # Stop if the model training failed
         assert result.success, result.failure_info.exception
 
@@ -383,12 +358,9 @@ class Thinker(BaseThinker):
         with open(self.out_dir / 'training-results.json', 'a') as fp:
             print(result.json(exclude={'inputs', 'value'}), file=fp)
 
-        self.logger.info('TIMING - End store_models')
-
     @task_submitter(task_type='sample')
     def submit_sampler(self):
         """Perform molecular dynamics to generate new structures"""
-        self.logger.info('TIMING - Start submit_sampler')
         self.sampling_ready.wait()
 
         # Pick the next eligible trajectory and start from the last validated structure
@@ -420,7 +392,6 @@ class Thinker(BaseThinker):
             topic='sample',
             task_info={'traj_id': trajectory.id, 'run_length': self.run_length}
         )
-        self.logger.info('TIMING - Finish submit_sampler')
 
     def _log_queue_sizes(self):
         """Log the size of the result queues"""
@@ -429,8 +400,6 @@ class Thinker(BaseThinker):
     @result_processor(topic='sample')
     def store_sampling_results(self, result: Result):
         """Store the results of a sampling run"""
-        self.logger.info('TIMING - Start store_sampling_results')
-
         traj_id = result.task_info['traj_id']
         self.logger.info(f'Received sampling result for trajectory {traj_id}. Success: {result.success}')
 
@@ -492,11 +461,8 @@ class Thinker(BaseThinker):
                 self.search_space.append(traj)
 
         # Save the result to disk
-        _get_proxy_stats(proxy, result)
         with open(self.out_dir / 'sampling-results.json', 'a') as fp:
             print(result.json(exclude={'inputs', 'value'}), file=fp)
-
-        self.logger.info('TIMING - Finish store_sampling_results')
 
     def submit_inference(self):
         """Submit a list of tasks for inference
@@ -599,7 +565,6 @@ class Thinker(BaseThinker):
             self._log_queue_sizes()
 
         # Store the results to disk
-        _get_proxy_stats(proxy, result)
         with open(self.out_dir / 'inference-results.json', 'a') as fp:
             print(result.json(exclude={'value', 'inputs'}), file=fp)
 
@@ -702,13 +667,10 @@ class Thinker(BaseThinker):
                                 keep_inputs=True,  # The XYZ file is not big
                                 task_info={'traj_id': to_run.traj_id, 'task_type': task_type,
                                            'ml_energy': to_run.ml_eng, 'xyz': xyz})
-        self.logger.info('TIMING - Finish submit_simulation')
 
     @result_processor(topic='simulate')
     def store_simulation(self, result: Result):
         """Store the results from a simulation"""
-        self.logger.info('TIMING - Start store_simulation')
-
         # Get the associated trajectory
         traj_id = result.task_info['traj_id']
         self.logger.info(f'Received a simulation from trajectory {traj_id}. Success: {result.success}')
@@ -799,7 +761,6 @@ class Thinker(BaseThinker):
             self.audit_results.append(10 / traj.last_run_length)  # 10 eV/atom is much larger than our typical error
 
         # Write output to disk regardless of whether we were successful
-        _get_proxy_stats(proxy, result)
         with open(self.out_dir / 'simulation-results.json', 'a') as fp:
             print(result.json(exclude={'value', 'inputs'}), file=fp)
 
