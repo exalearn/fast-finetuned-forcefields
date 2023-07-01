@@ -163,7 +163,7 @@ class Thinker(BaseThinker):
         self.max_force = max_force
 
         # Determine where we are running the
-        self.sampling_on_qc_workers = n_sampling_workers > 0
+        self.sampling_on_qc_workers = n_sampling_workers == 0
         self.n_sampling_workers = n_sampling_workers
         if self.sampling_on_qc_workers:
             self.logger.info(f'Running sampling on {self.n_sampling_workers} separate workers')
@@ -983,9 +983,11 @@ if __name__ == '__main__':
     # Create the task server
     cpu_methods = [my_run_simulation]
     gpu_methods = [my_train_schnet, my_eval_schnet]
-    if args.num_qc_workers > 0:
+    if args.num_sampling_workers > 0:
+        logger.info('Deploying sampling tasks on GPUs')
         gpu_methods.append(my_run_dynamics)
     else:
+        logger.info('Deploying sampling tasks on CPUs')
         cpu_methods.append(my_run_dynamics)
 
     if args.parsl:
