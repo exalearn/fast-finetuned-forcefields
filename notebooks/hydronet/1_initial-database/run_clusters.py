@@ -52,7 +52,7 @@ def run_nwchem(atoms: ase.Atoms, calc: NWChem, temp_path: Optional[str] = None) 
     # Make a run directory based on the input XYZ
     run_hash = sha256(atoms.positions.tobytes()).hexdigest()[-8:]
     temp_dir = Path(temp_path or gettempdir()) / f'fff-{run_hash}'
-    if (temp_dir / 'nwchem.db').exists():
+    if (temp_dir / 'nwchem/nwchem.db').exists():
         calc.parameters['restart_kw'] = 'restart'
 
     # Update the scratch directory
@@ -93,7 +93,7 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument('--num-nodes', default=4, help='Number of nodes for each NWChem computation', type=int)
     parser.add_argument('--num-parallel', default=1, help='Number of NWChem computations to run in parallel', type=int)
-    parser.add_argument('--num-jobs', default=1, help='Number of jobs to run', type=int)
+    parser.add_argument('--runs-per-job', default=1, help='Number of NWChem computations per job', type=int)
     parser.add_argument('--basis', default='aug-cc-pvdz', help='Basis set to use for all atoms')
     parser.add_argument('--max-size', default=None, type=int, help='Maximum size of cluster to run')
     parser.add_argument('--temp-dir', default=None, help='Where to store the temporary files')
@@ -159,10 +159,10 @@ if __name__ == "__main__":
     # Make the Parsl configuration
     config = parsl.Config(
         app_cache=False,  # No caching needed
-        retries=1,  # Will restart a job if it fails for any reason
+        retries=16,  # Will restart a job if it fails for any reason
         executors=[HighThroughputExecutor(
             label='launch_from_mpi_nodes',
-            max_workers=args.num_parallel // args.num_jobs,
+            max_workers=args.runs_per_job,
             cores_per_worker=1e-6,
             start_method='thread',
             provider=SlurmProvider(
@@ -170,10 +170,10 @@ if __name__ == "__main__":
                 account='m3196',
                 launcher=SimpleLauncher(),
                 walltime='24:00:00',
-                nodes_per_block=args.num_nodes * args.num_parallel // args.num_jobs,
-                init_blocks=args.num_jobs,
+                nodes_per_block=args.num_nodes * args.runs_per_job,
+                init_blocks=args.num_parallel // args.runs_per_job,
                 min_blocks=0,
-                max_blocks=args.num_jobs,  # Maximum number of jobs
+                max_blocks=args.num_parallel // args.runs_per_job,  # Maximum number of jobs
                 scheduler_options='''#SBATCH --image=ghcr.io/nwchemgit/nwchem-720.nersc.mpich4.mpi-pr:latest
 #SBATCH -C cpu
 #SBATCH --qos=preempt''',
