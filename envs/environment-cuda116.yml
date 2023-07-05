@@ -1,0 +1,36 @@
+# Environment compatible with CUDA 11.6
+#  Assumes it is installed locally, as with CUDA
+name: fastforce
+channels:
+  - defaults
+  - psi4/label/dev
+  - conda-forge
+dependencies:
+  - python==3.10.*
+  - pandas==1.*
+  - pydantic
+  - pymongo
+  - psi4==1.6.*
+  - tqdm
+  - jupyterlab
+  - matplotlib
+  - tensorboard
+  - pytest
+  - pip
+  - pip:
+      # TODO (wardlt): Move these to a requirements file
+      # Latest version of PyG: https://github.com/pyg-team/pytorch_geometric#pytorch-112
+      - --extra-index-url https://download.pytorch.org/whl/cu116
+      - -f https://data.pyg.org/whl/torch-1.12.0+cu116.html
+      - torch-scatter==2.1.0
+      - torch-sparse==0.6.16
+      - torch-geometric==2.2.0
+      - torch-cluster==1.6.0
+      - torch==1.12.0+cu116
+      - git+https://gitlab.com/WardLT/ase.git@twostep_nwc
+      - colmena>=0.4.0
+      - globus-cli
+      - schnetpack==1.*
+      - funcx
+      - funcx-endpoint
+      - -e ..
