@@ -22,7 +22,12 @@ def run_calculator(xyz: str,
                    threads_per_rank: int = 1) -> str:
     """Run a computation
 
+    The function will update the command string for the calculator by replacing the following text blocks:
 
+    - FFF_NUM_NODES: Number of nodes
+    - FFF_RANKS_PER_NODE: Number of ranks per node
+    - FFF_THREADS_PER_RANK: Number of threads per rank
+    - FFF_TOTAL_RANKS: Product of ranks per node and number of nodes
 
     Args:
         xyz: Cluster to evaluate
@@ -44,18 +49,25 @@ def run_calculator(xyz: str,
         return command.replace('FFF_NUM_NODES', str(nodes)).replace('FFF_RANKS_PER_NODE', str(ranks_per_node)) \
             .replace('FFF_TOTAL_RANKS', str(total_ranks)).replace('FFF_THREADS_PER_RANK', str(threads_per_rank))
 
+    original_command = None
     if isinstance(calc, FileIOCalculator):
+        original_command = calc.command
         calc.command = _update_command(calc.command)
     elif isinstance(calc, dict) and 'command' in calc:
+        calc = calc.copy()  # Ensure we do not edit it
         calc['command'] = _update_command(calc['command'])
 
     # Some calculators do not clean up their resources well
-    if subprocess:
-        with ProcessPoolExecutor(max_workers=1) as exe:
-            fut = exe.submit(_run_calculator, str(xyz), calc, temp_path)  # str ensures proxies are resolved
-            return fut.result(timeout=timeout)
-    else:
-        return _run_calculator(str(xyz), calc, temp_path)
+    try:
+        if subprocess:
+            with ProcessPoolExecutor(max_workers=1) as exe:
+                fut = exe.submit(_run_calculator, str(xyz), calc, temp_path)  # str ensures proxies are resolved
+                return fut.result(timeout=timeout)
+        else:
+            return _run_calculator(str(xyz), calc, temp_path)
+    finally:
+        if original_command is not None and isinstance(calc, FileIOCalculator):
+            calc.command = original_command
 
 
 def _run_calculator(xyz: str, calc: Calculator | dict, temp_path: Optional[str] = None) -> str:

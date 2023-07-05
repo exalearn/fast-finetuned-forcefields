@@ -89,3 +89,4 @@ def test_nwchem(atoms):
 
     xyz = write_to_string(atoms, 'xyz')
     run_calculator(xyz, nwchem, ranks_per_node=2, subprocess=False)
+    assert 'FFF_TOTAL' in nwchem.command
