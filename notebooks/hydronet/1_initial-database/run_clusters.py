@@ -160,6 +160,7 @@ if __name__ == "__main__":
     config = parsl.Config(
         app_cache=False,  # No caching needed
         retries=16,  # Will restart a job if it fails for any reason
+        strategy='htex_auto_scale',  # Will kill unused workers after 2 minutes
         executors=[HighThroughputExecutor(
             label='launch_from_mpi_nodes',
             max_workers=args.runs_per_job,
