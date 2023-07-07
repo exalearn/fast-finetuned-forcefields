@@ -12,6 +12,7 @@ from parsl.providers import SlurmProvider
 from ase.io import read
 from tqdm import tqdm
 import pandas as pd
+import numpy as np
 import parsl
 
 
@@ -33,35 +34,52 @@ def run_nwchem(atoms, basis, nodes, ranks_per_node, twostep: bool, walltime=None
 
     # Compute the number of ranks and such
     total_ranks = nodes * ranks_per_node
-    cores_per_rank = 68 // ranks_per_node  # Set for Cori KNL
+    cores_per_rank = 128 // ranks_per_node  # Set for Perlmutter CPU
     
     # Create the options for the DFT first step
     new_opts = {}
     if twostep:
         new_opts = {
-            'initwfc': {
-                'dft': {
-                    'xc': 'hfexch',
-                    # 'convergence': {
-                    #     'energy': '1d-12',
-                    #     'gradient': '5d-19'
-                    # },
-                    # 'tolerances': {'acccoul': 15},
-                    'maxiter': 50,
-                },
-                'set': {
-                    'quickguess': 't',
-                    'fock:densityscreen': 'f',
-                    'lindep:n_dep': 0,
-                }
+            'pretasks': [{
+            'theory': 'dft',
+            'dft': {
+                'xc': 'hfexch',
+                # 'convergence': {  # TODO (wardlt): Explore if there is a better value for the convergence
+                #     'energy': '1d-12',
+                #     'gradient': '5d-19'
+                # },
+                # 'tolerances': {'acccoul': 15},
+                'maxiter': 50,
+            },
+            'set': {
+                'quickguess': 't',
+                'fock:densityscreen': 'f',
+                'lindep:n_dep': 0,
             }
+        }],
+            # 'pretasks': [{
+            #     'basis': "aug-cc-pvdz",
+            #     "theory": "scf",
+            #     'set': {
+            #         'quickguess': 't',
+            #         'fock:densityscreen': 'f',
+            #         'lindep:n_dep': 0,
+            # }}, {
+            #     'basis': basis,
+            #     "theory": "scf",
+            #     'set': {
+            #         'quickguess': 't',
+            #         'fock:densityscreen': 'f',
+            #         'lindep:n_dep': 0,
+            # }}]
         }
 
-    with TemporaryDirectory(dir='/global/cscratch1/sd/wardlt/nwchem-bench/') as tmpdir:
+    with TemporaryDirectory(dir='/pscratch/sd/w/wardlt/nwchem-bench/') as tmpdir:
         nwchem = NWChem(
             scratch=str(tmpdir),
             perm=str(tmpdir),
-            memory=f'{90 / ranks_per_node:.1f} gb',
+            theory='mp2',
+            memory=f'{500 / ranks_per_node:.1f} gb',
             basis={'*': basis},
             set={
                 'lindep:n_dep': 0,
@@ -92,12 +110,13 @@ def run_nwchem(atoms, basis, nodes, ranks_per_node, twostep: bool, walltime=None
 if __name__ == "__main__":
     # Make the argument parser
     parser = ArgumentParser()
-    parser.add_argument('--ranks-per-node', default=64, help='Number of ranks per node', type=int)
+    parser.add_argument('--ranks-per-node', default=128, help='Number of ranks per node', type=int)
     parser.add_argument('--max-repeats', default=1, help='Number of times to repeat the computations', type=int)
     parser.add_argument('--num-nodes', default=1, help='Number of nodes on which to run', type=int)
     parser.add_argument('--basis', default='aug-cc-pvdz', help='Basis set to use for all atoms')
     parser.add_argument('--dftguess', action='store_true', help='Run a DFT calculation to get an initial WFC guess')
-    parser.add_argument('--timeout', default=None, type=float, help='Timeout for DFT calculations')
+    parser.add_argument('--timeout', default=np.inf, type=float, help='Timeout for DFT calculations')
+    parser.add_argument('--min-size', default=None, type=int, help='Minimum number of waters to run')
     args = parser.parse_args()
 
     # Recognize which node we're running on
@@ -105,8 +124,12 @@ if __name__ == "__main__":
     print(f'Running on {hostname}. Nodes={args.num_nodes}. Ranks per Node: {args.ranks_per_node}')
 
     # Load in the example structures
-    examples = pd.read_csv('example_structures.csv')
+    examples = pd.read_csv('../example_structures.csv')
     print(f'Loaded in {len(examples)} example structures')
+    
+    if args.min_size is not None:
+        examples.query(f'n_waters>={args.min_size}', inplace=True)
+        print(f'Downselected to {len(examples)} with at least {args.min_size} waters')
 
     # Load in what has been run already
     out_file = Path('runtimes.csv')
@@ -127,27 +150,27 @@ if __name__ == "__main__":
             label='launch_from_mpi_nodes',
             max_workers=1,
             provider=SlurmProvider(
-                partition='regular',
-                account='m1513',
+                partition=None,  # 'debug'
+                account='m3196',
                 launcher=SimpleLauncher(),
-                walltime='36:00:00',
+                walltime='12:00:00',
                 nodes_per_block=args.num_nodes,  # Number of nodes per job
                 init_blocks=0,
                 min_blocks=1,
                 max_blocks=1,  # Maximum number of jobs
-                scheduler_options='#SBATCH --image=ghcr.io/nwchemgit/nwchem-702.mpipr.nersc:latest\n#SBATCH -C knl',
-                worker_init=f'''
+                scheduler_options='''#SBATCH --image=ghcr.io/nwchemgit/nwchem-720.nersc.mpich4.mpi-pr:latest
+#SBATCH -C cpu
+#SBATCH --qos=regular''',
+                worker_init='''
 module load python
-conda activate /global/project/projectdirs/m1513/lward/hydronet/env
+conda activate /global/cfs/cdirs/m1513/lward/fast-finedtuned-forcefields/env-cpu/
 
-module swap craype-{{${{CRAY_CPU_TARGET}},mic-knl}}
-export OMP_NUM_THREADS={68 // args.ranks_per_node}
-export MPICH_GNI_MAX_EAGER_MSG_SIZE=131026
-export MPICH_GNI_NUM_BUFS=80
-export MPICH_GNI_NDREG_MAXSIZE=16777216
-export MPICH_GNI_MBOX_PLACEMENT=nic
-export MPICH_GNI_RDMA_THRESHOLD=65536
 export COMEX_MAX_NB_OUTSTANDING=6
+export FI_CXI_RX_MATCH_MODE=hybrid
+export COMEX_EAGER_THRESHOLD=16384
+export FI_CXI_RDZV_THRESHOLD=16384
+export FI_CXI_OFLOW_BUF_COUNT=6
+export MPICH_SMP_SINGLE_COPY_MODE=CMA
 
 which python
 hostname

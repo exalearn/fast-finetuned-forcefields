@@ -25,7 +25,7 @@ from fff.simulation import run_calculator
 from fff.simulation.utils import read_from_string, write_to_string
 
 _my_dir = Path(__file__).parent
-pure_water = _my_dir / '../../../notebooks/hydronet/nwchem-evaluation/example_structures.csv'
+pure_water = _my_dir / '../../../notebooks/hydronet/0_code-evaluation/example_structures.csv'
 methane = _my_dir / '../../../notebooks/hydronet/introduce-methane/methane-added.db'
 
 if __name__ == "__main__":

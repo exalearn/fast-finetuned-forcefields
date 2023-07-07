@@ -2,6 +2,7 @@
 from concurrent.futures import TimeoutError
 
 from parsl import Config, ThreadPoolExecutor
+from ase.calculators.nwchem import NWChem
 from ase.calculators.lj import LennardJones
 from pytest import mark, raises
 import numpy as np
@@ -79,3 +80,13 @@ def test_async(atoms, tmpdir):
     result = calc.get_forces(atoms)
     async_result = async_calc.get_forces(atoms)
     assert np.isclose(result, async_result).all()
+
+
+def test_nwchem(atoms):
+    """Test NWChem with rank replacement"""
+
+    nwchem = NWChem(theory='scf', basis='3-21g', command='mpirun -np FFF_TOTAL_RANKS nwchem PREFIX.nwi > PREFIX.nwo')
+
+    xyz = write_to_string(atoms, 'xyz')
+    run_calculator(xyz, nwchem, ranks_per_node=2, subprocess=False)
+    assert 'FFF_TOTAL' in nwchem.command
