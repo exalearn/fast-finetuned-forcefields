@@ -47,7 +47,7 @@ logger = logging.getLogger('main')
 # Hard-coded values for the CPU nodes
 cores_per_node = 128
 memory_per_node = 500  # In GB
-scratch_path = '/pscratch/sd/w/wardlt/nwchem-db/'
+scratch_path = '/pscratch/sd/w/wardlt/fff/'
 
 
 @dataclass
@@ -172,7 +172,7 @@ class Thinker(BaseThinker):
         self.queue_length = queue_length
         self.queue_tolerance = queue_tolerance
         self.max_force = max_force
-        self.node_size_map = sorted(node_size_map)
+        self.node_size_map = [0] + sorted(node_size_map)
 
         # Determine where we are running the sampling tasks
         self.sampling_on_qc_workers = n_sampling_workers == 0
@@ -673,9 +673,10 @@ class Thinker(BaseThinker):
         # Determine the number of nodes required
         atoms: ase.Atoms = to_run.atoms
         n_electrons = sum(atoms.get_atomic_numbers())
-        node_count = 2 ** min(i for i, x in enumerate(self.node_size_map) if n_electrons < x)
+        node_count = 2 ** max(i for i, x in enumerate(self.node_size_map) if n_electrons > x)
+        self.logger.info(f'Running on {node_count} nodes. Electron count={n_electrons}')
         if node_count > 1:
-            self.logger.info(f'Waiting for {node_count} more nodes to become available. Electron count={n_electrons}')
+            self.logger.info(f'Waiting for {node_count} more nodes to become available.')
             self.rec.acquire("simulate", node_count - 1)
 
         atoms.set_center_of_mass([0, 0, 0])
@@ -813,7 +814,7 @@ if __name__ == '__main__':
     group.add_argument('--search-space', help='Path to ASE DB of starting structures for molecular dynamics sampling',
                        required=True)
     group.add_argument('--num-to-run', default=100, type=int, help='Total number of simulations to perform')
-    group.add_argument('--calculator', choices=['ttm', 'dft'], required=True, help='Method used to create training data.')
+    group.add_argument('--calculator', choices=['ttm', 'dft', 'mp2'], required=True, help='Method used to create training data.')
 
     # Configuration for the simulation tasks
     group = parser.add_argument_group(title='Chemistry Settings',
@@ -883,7 +884,7 @@ if __name__ == '__main__':
 
     # Check that the dataset exists
     with connect(args.training_set) as db:
-        assert len(db) > 0
+        assert len(db) > 0, f'No entries in {args.training_set}'
         pass
 
     # Get the hash of the training data and model
