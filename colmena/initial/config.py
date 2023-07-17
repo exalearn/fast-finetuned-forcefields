@@ -182,7 +182,7 @@ which python
     return config
 
 
-def perlmutter_nwchem(log_dir: str, qc_nodes: int = 128) -> Config:
+def perlmutter_nwchem(log_dir: str, qc_nodes: int = 32) -> Config:
     """Configuration which uses Perlmutter GPU for ML tasks and Perlmutter CPU to run MPI tasks
 
     Args:
@@ -193,9 +193,10 @@ def perlmutter_nwchem(log_dir: str, qc_nodes: int = 128) -> Config:
     return Config(
         run_dir=log_dir,
         retries=1,
+        strategy='htex_auto_scale',
         executors=[
             HighThroughputExecutor(
-                label='launch_from_mpi_nodes',
+                label='cpu',
                 max_workers=qc_nodes,  # Maximum possible number
                 cores_per_worker=1e-6,
                 start_method='thread',
@@ -203,7 +204,7 @@ def perlmutter_nwchem(log_dir: str, qc_nodes: int = 128) -> Config:
                     partition=None,  # 'debug'
                     account='m3196',
                     launcher=SimpleLauncher(),
-                    walltime='24:00:00',
+                    walltime='2:00:00',
                     nodes_per_block=qc_nodes,
                     init_blocks=0,
                     min_blocks=0,
@@ -235,18 +236,19 @@ pwd''',
                 provider=SlurmProvider(
                     partition=None,  # 'debug'
                     account='m3196',
-                    launcher=SrunLauncher(overrides="-c 64"),
+                    launcher=SrunLauncher(overrides="--gpus-per-node 4 -c 64"),
                     walltime='12:00:00',
                     nodes_per_block=2,  # So that we have a total of 8 GPUs
                     init_blocks=0,
-                    min_blocks=1,
+                    min_blocks=0,
                     max_blocks=1,  # Maximum number of jobs
+                    cmd_timeout=1200,
                     scheduler_options='''#SBATCH -C gpu
 #SBATCH --qos=regular''',
                     worker_init='''
 module load python
 module list
-conda activate /global/cfs/cdirs/m1513/lward/fast-finedtuned-forcefields/env-gpu/
+source activate /global/cfs/cdirs/m1513/lward/fast-finedtuned-forcefields/env-gpu/
 
 nvidia-smi
 which python
