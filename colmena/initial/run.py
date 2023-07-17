@@ -15,7 +15,8 @@ import sys
 
 import ase
 from ase.db import connect
-from colmena.models import Result
+from ase.calculators.nwchem import NWChem
+from colmena.models import Result, ResourceRequirements
 from colmena.queue import ColmenaQueues
 from colmena.queue.redis import RedisQueues
 from colmena.thinker import BaseThinker, event_responder, result_processor, ResourceCounter, task_submitter
@@ -42,6 +43,11 @@ from fff.simulation import run_calculator
 from fff.simulation.utils import read_from_string, write_to_string
 
 logger = logging.getLogger('main')
+
+# Hard-coded values for the CPU nodes
+cores_per_node = 128
+memory_per_node = 500  # In GB
+scratch_path = '/pscratch/sd/w/wardlt/nwchem-db/'
 
 
 @dataclass
@@ -92,8 +98,33 @@ class SimulationTask:
 
 
 class Thinker(BaseThinker):
-    """Class that schedules work on the HPC"""
+    """Class that schedules work on the HPC
 
+    Args:
+        queues: Queues to send and receive work
+        out_dir: Directory in which to write output files
+        db_path: Path to the training data which has been collected so far
+        search_path: Path to a databases of geometries to use for searching
+        model: Initial model being trained. All further models will be trained using these starting weights
+        infer_chunk_size: Number of structures to evaluate per each inference task
+        infer_pool_size: Number of inference chunks to perform before selecting new tasks
+        n_to_run: Number of simulations to run
+        n_models: Number of models to train in the ensemble
+        n_qc_workers: Number of workers dedicated to quantum chemistry tasks
+        node_size_map: Defines a relationship between system size and number of nodes required.
+            Each member of the list is a number of electrons. We determine the number of nodes required
+            by finding the index of the last item smaller than the number of electrons for a system,
+            then raising two to that power. E.g., items larger than the first entry run on 2^1==2 nodes.
+        energy_tolerance: How large of an energy difference to accept when auditing
+        max_force: Structures with forces larger than this threshold will be excluded from training sets
+        min_run_length: Minimum length of sampling runs
+        max_run_length: Minimum length of sampling runs
+        samples_per_run: Number of samples to produce during a sampling run
+        queue_length: Target number of audit calculations to have in queue
+        queue_tolerance: Fraction queue length can vary before we reallocate workers (should be <<1)
+        retrain_freq: How often to trigger retraining
+        ps_names: Mapping of task type to ProxyStore object associated with it
+    """
     def __init__(
             self,
             queues: ColmenaQueues,
@@ -111,33 +142,13 @@ class Thinker(BaseThinker):
             n_to_run: int,
             n_models: int,
             n_qc_workers: int,
+            node_size_map: list[int],
             n_sampling_workers: int,
             queue_length: int,
             queue_tolerance: float,
             retrain_freq: int,
             ps_names: Dict[str, str],
     ):
-        """
-        Args:
-            queues: Queues to send and receive work
-            out_dir: Directory in which to write output files
-            db_path: Path to the training data which has been collected so far
-            search_path: Path to a databases of geometries to use for searching
-            model: Initial model being trained. All further models will be trained using these starting weights
-            infer_chunk_size: Number of structures to evaluate per each inference task
-            infer_pool_size: Number of inference chunks to perform before selecting new tasks
-            n_to_run: Number of simulations to run
-            n_models: Number of models to train in the ensemble
-            energy_tolerance: How large of an energy difference to accept when auditing
-            max_force: Structures with forces larger than this threshold will be excluded from training sets
-            min_run_length: Minimum length of sampling runs
-            max_run_length: Minimum length of sampling runs
-            samples_per_run: Number of samples to produce during a sampling run
-            queue_length: Target number of audit calculations to have in queue
-            queue_tolerance: Fraction queue length can vary before we reallocate workers (should be <<1)
-            retrain_freq: How often to trigger retraining
-            ps_names: Mapping of task type to ProxyStore object associated with it
-        """
         # Make the resource tracker
         #  For now, we only control resources over how many samplers are run at a time
         rec = ResourceCounter(n_qc_workers + n_sampling_workers, ['sample', 'simulate'])
@@ -161,8 +172,9 @@ class Thinker(BaseThinker):
         self.queue_length = queue_length
         self.queue_tolerance = queue_tolerance
         self.max_force = max_force
+        self.node_size_map = sorted(node_size_map)
 
-        # Determine where we are running the
+        # Determine where we are running the sampling tasks
         self.sampling_on_qc_workers = n_sampling_workers == 0
         self.n_sampling_workers = n_sampling_workers
         if self.sampling_on_qc_workers:
@@ -510,7 +522,6 @@ class Thinker(BaseThinker):
         # Get the batch information
         infer_id = result.task_info['infer_id']
         model_id = result.task_info['model_id']
-        proxy = result.value
         self.logger.info(f'Received inference batch {infer_id} model {model_id}. Success: {result.success}')
 
         # If first result from batch, create storage
@@ -590,7 +601,7 @@ class Thinker(BaseThinker):
         structures = np.array(structures, dtype=object)
         traj_ids = np.array(traj_ids)
 
-        # TODO (wardlt): Screen out molecules too similar to training set
+        # TODO (wardlt): Screen out molecules too similar to training set. Not critical as they should have small std
 
         # Gradually add a list of molecules
         output = []
@@ -657,13 +668,21 @@ class Thinker(BaseThinker):
             if task_type is None:
                 self.logger.info('No tasks are available to run. Waiting ...')
                 self.has_tasks.clear()  # We don't have any tasks to run
+            self.logger.info(f'Selected a {task_type} to run next')
 
-        # Submit it
-        self.logger.info(f'Selected a {task_type} to run next')
-        atoms = to_run.atoms
+        # Determine the number of nodes required
+        atoms: ase.Atoms = to_run.atoms
+        n_electrons = sum(atoms.get_atomic_numbers())
+        node_count = 2 ** min(i for i, x in enumerate(self.node_size_map) if n_electrons < x)
+        if node_count > 1:
+            self.logger.info(f'Waiting for {node_count} more nodes to become available. Electron count={n_electrons}')
+            self.rec.acquire("simulate", node_count - 1)
+
         atoms.set_center_of_mass([0, 0, 0])
         xyz = write_to_string(atoms, 'xyz')
-        self.queues.send_inputs(xyz, method='run_calculator', topic='simulate',
+        self.queues.send_inputs(xyz, input_kwargs={'nodes': node_count},
+                                resources=ResourceRequirements(node_count=node_count),  # TODO (avoid duplication)
+                                method='run_calculator', topic='simulate',
                                 keep_inputs=True,  # The XYZ file is not big
                                 task_info={'traj_id': to_run.traj_id, 'task_type': task_type,
                                            'ml_energy': to_run.ml_eng, 'xyz': xyz})
@@ -673,7 +692,7 @@ class Thinker(BaseThinker):
         """Store the results from a simulation"""
         # Get the associated trajectory
         traj_id = result.task_info['traj_id']
-        self.logger.info(f'Received a simulation from trajectory {traj_id}. Success: {result.success}')
+        self.logger.info(f'Received a simulation from trajectory {traj_id}. Success: {result.success}. Node count: {result.resources.node_count}')
 
         # Adjust resources if queue is too small
         if len(self.task_queue_audit) <= self.queue_length * (1 - self.queue_tolerance) and \
@@ -687,7 +706,7 @@ class Thinker(BaseThinker):
             else:
                 self.logger.info('Running low on simulation tasks. Restarting sampling')
                 self.rec.reallocate(None, 'sample', self.n_sampling_workers)  # Should complete immediately
-        self.rec.release('simulate', 1)
+        self.rec.release('simulate', result.resources.node_count)
 
         # Store the result in the database if successful
         task_type = result.task_info['task_type']
@@ -796,6 +815,16 @@ if __name__ == '__main__':
     group.add_argument('--num-to-run', default=100, type=int, help='Total number of simulations to perform')
     group.add_argument('--calculator', choices=['ttm', 'dft'], required=True, help='Method used to create training data.')
 
+    # Configuration for the simulation tasks
+    group = parser.add_argument_group(title='Chemistry Settings',
+                                      description='Settings related to quantum chemistry. Only used by NWChem for now')
+    group.add_argument('--node-size-map', nargs='+', default=(np.inf,), type=int,
+                       help='Defines a relationship between system size and number of nodes required. '
+                            'Each member of the list is a number of electrons. We determine the number of nodes required '
+                            'by finding the index of the first item larger than the number of electrons for a system, '
+                            'then raising two to that index. E.g., items smaller second entry but larger than the first '
+                            'run on 2^1==2 nodes.')
+
     # Parameters related to training the models
     group = parser.add_argument_group(title="Training Settings")
     group.add_argument("--num-epochs", type=int, default=32, help="Maximum number of training epochs")
@@ -810,7 +839,6 @@ if __name__ == '__main__':
 
     # Parameters related to sampling for new structures
     group = parser.add_argument_group(title="Sampling Settings")
-    #  TODO (wardlt): Switch to using a different endpoint for simulation and sampling tasks?
     group.add_argument("--sampling-method", choices=['md', 'mhm', 'mctbp'], default='md', help='Method used to sample structures')
     group.add_argument("--num-samplers", type=int, default=1, help="Number of agents to use to sample structures")
     group.add_argument("--min-run-length", type=int, default=1,
@@ -869,8 +897,50 @@ if __name__ == '__main__':
         calc = dict(calc='psi4', method='pbe0', basis='aug-cc-pvdz', num_threads=64)
     elif args.calculator == 'ttm':
         from ttm.ase import TTMCalculator
-
         calc = TTMCalculator()
+    elif args.calculator == 'mp2':
+        # Use NWChem and run MP2//AVTZ
+        calc = NWChem(
+            memory=f'{memory_per_node / cores_per_node:.1f} gb',
+            basis={'*': 'aug-cc-pvtz'},
+            basispar='spherical',
+            set={
+                'lindep:n_dep': 0,
+                'cphf:maxsub': 95,
+                'mp2:aotol2e fock': '1d-14',
+                'mp2:aotol2e': '1d-14',
+                'mp2:backtol': '1d-14',
+                'cphf:maxiter': 999,
+                'cphf:thresh': '6.49d-5',
+                'int:acc_std': '1d-16'
+            },
+            scf={
+                'maxiter': 99,
+                'tol2e': '1d-15',
+            },
+            mp2={'freeze': 'atomic'},
+            theory='mp2',
+            pretasks=[{
+                'theory': 'dft',
+                'dft': {
+                    'xc': 'hfexch',
+                    'maxiter': 50,
+                },
+                'set': {
+                    'quickguess': 't',
+                    'fock:densityscreen': 'f',
+                    'lindep:n_dep': 0,
+                }
+            }],
+            # Note: Parsl sets --ntasks-per-node=1 in #SBATCH. For some reason, --ntasks in srun overrides it
+            #  The function which executes this function will replace "FFF_NUM_NODES" and other parts with actual values
+            command=(f'srun -N FFF_NUM_NODES '  
+                     f'--ntasks=FFF_TOTAL_RANKS '
+                     f'--export=ALL,OMP_NUM_THREADS={1} '
+                     f'--ntasks-per-node=FFF_RANKS_PER_NODE '
+                     # Note: Parsl sets --ntasks-per-node=1 in #SBATCH. For some reason, --ntasks in srun overrides it
+                     '--cpu-bind=cores shifter nwchem PREFIX.nwi > PREFIX.nwo'),
+        )
     else:
         raise ValueError(f'Calculator not yet supported: {args.calculator}')
 
@@ -960,7 +1030,7 @@ if __name__ == '__main__':
                             learning_rate=args.learning_rate,
                             huber_deltas=args.huber_deltas)
     my_eval_schnet = _wrap(schnet.evaluate, device='cuda')
-    my_run_simulation = _wrap(run_calculator, calc=calc, temp_path='/lus/eagle/projects/ExaLearn/psi4')
+    my_run_simulation = _wrap(run_calculator, calc=calc, temp_path=scratch_path, ranks_per_node=cores_per_node)
 
     # Determine which sampling method to use
     sampler_kwargs = {}
@@ -1024,6 +1094,7 @@ if __name__ == '__main__':
         n_to_run=args.num_to_run,
         n_models=args.ensemble_size,
         n_qc_workers=args.num_qc_workers,
+        node_size_map=args.node_size_map,
         n_sampling_workers=args.num_sampling_workers,
         energy_tolerance=args.energy_tolerance,
         min_run_length=args.min_run_length,
