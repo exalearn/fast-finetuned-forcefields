@@ -193,7 +193,6 @@ def perlmutter_nwchem(log_dir: str, qc_nodes: int = 32) -> Config:
     return Config(
         run_dir=log_dir,
         retries=1,
-        strategy='htex_auto_scale',
         executors=[
             HighThroughputExecutor(
                 label='cpu',
@@ -202,9 +201,9 @@ def perlmutter_nwchem(log_dir: str, qc_nodes: int = 32) -> Config:
                 start_method='thread',
                 provider=SlurmProvider(
                     partition=None,  # 'debug'
-                    account='m3196',
+                    account='m1513',
                     launcher=SimpleLauncher(),
-                    walltime='2:00:00',
+                    walltime='12:00:00',
                     nodes_per_block=qc_nodes,
                     init_blocks=0,
                     min_blocks=0,
@@ -235,7 +234,7 @@ pwd''',
                 cpu_affinity='block',
                 provider=SlurmProvider(
                     partition=None,  # 'debug'
-                    account='m3196',
+                    account='m1513',
                     launcher=SrunLauncher(overrides="--gpus-per-node 4 -c 64"),
                     walltime='12:00:00',
                     nodes_per_block=2,  # So that we have a total of 8 GPUs
