@@ -180,6 +180,12 @@ class Thinker(BaseThinker):
         if self.sampling_on_qc_workers:
             self.logger.info(f'Running sampling on {self.n_sampling_workers} separate workers')
 
+        # Determine where we are running the
+        self.sampling_on_qc_workers = n_sampling_workers == 0
+        self.n_sampling_workers = n_sampling_workers
+        if self.sampling_on_qc_workers:
+            self.logger.info(f'Running sampling on {self.n_sampling_workers} separate workers')
+
         # Load in the search space
         self.search_space_lock: Lock = Lock()
         with connect(search_path) as db:
