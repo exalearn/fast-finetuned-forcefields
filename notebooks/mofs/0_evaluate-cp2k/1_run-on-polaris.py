@@ -33,6 +33,7 @@ def run_cp2k(name: str, cp2k_opts: dict, atoms: Atoms, run_type: str, max_steps:
         scratch_dir: Directory in which to save files
     """
     from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+    from ase.constraints import ExpCellFilter
     from ase.optimize import QuasiNewton
     from ase.md import VelocityVerlet
     from ase.io import Trajectory
@@ -59,7 +60,8 @@ def run_cp2k(name: str, cp2k_opts: dict, atoms: Atoms, run_type: str, max_steps:
             MaxwellBoltzmannDistribution(atoms, temperature_K=300)
             dyn = VelocityVerlet(atoms, timestep=1 * units.fs)
         elif run_type == 'qn':
-            dyn = QuasiNewton(atoms, logfile='opt.log')
+            ecf = ExpCellFilter(atoms)
+            dyn = QuasiNewton(ecf, logfile='opt.log')
         else:
             raise ValueError(f'Calculation type not supported: {run_type}')
 
