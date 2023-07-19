@@ -5,6 +5,7 @@ which MOF is used as inputs,
 what type of calculation is performed,
 and the number of steps"""
 from argparse import ArgumentParser
+from platform import node
 from zipfile import ZipFile
 from pathlib import Path
 import json
@@ -21,7 +22,7 @@ from fff.simulation import read_from_string
 
 
 @python_app
-def run_cp2k(name: str, cp2k_opts: dict, atoms: Atoms, run_type: str, max_steps: int, scratch_dir: Path) -> tuple[list[Atoms], float]:
+def run_cp2k(name: str, cp2k_opts: dict, atoms: Atoms, run_type: str, max_steps: int, scratch_dir: Path) -> tuple[list[Atoms], float, int]:
     """Run CP2K for a certain number of optimization or MD steps
 
     Args:
@@ -41,6 +42,7 @@ def run_cp2k(name: str, cp2k_opts: dict, atoms: Atoms, run_type: str, max_steps:
     from ase.calculators.cp2k import CP2K
     from time import perf_counter
     from pathlib import Path
+    import re
     import os
 
     # Make the output directory
@@ -67,7 +69,7 @@ def run_cp2k(name: str, cp2k_opts: dict, atoms: Atoms, run_type: str, max_steps:
 
         # Define the output path
         traj_path = "md.traj"
-        props_to_write = ['energy', 'forces', 'momenta']
+        props_to_write = ['energy', 'forces', 'momenta', 'stress']
         with Trajectory(str(traj_path), mode='w', atoms=atoms, properties=props_to_write) as traj:
             dyn.attach(traj, interval=1)
 
@@ -79,7 +81,6 @@ def run_cp2k(name: str, cp2k_opts: dict, atoms: Atoms, run_type: str, max_steps:
         output = []
         with Trajectory(str(traj_path), mode='r') as traj:
             output.extend([x for x in traj])
-        output.append(atoms)
 
         # Kill the calculator by deleting the object to stop the underlying
         #  shell and then set the `_shell` parameter of the object so that the
@@ -87,10 +88,15 @@ def run_cp2k(name: str, cp2k_opts: dict, atoms: Atoms, run_type: str, max_steps:
         #  when the object is finally garbage collected
         calc.__del__()
         calc._shell = None
+
+        # Count the number of electrons
+        text = Path('cp2k.out').read_text()
+        n_electrons = sum(map(int, re.findall(r' Number of electrons:\s+(\d+)', text)[:2]))
     finally:
         os.chdir(start_dir)
 
-    return output, perf_counter() - start_time
+
+    return output, perf_counter() - start_time, n_electrons
 
 
 if __name__ == "__main__":
@@ -102,6 +108,10 @@ if __name__ == "__main__":
     parser.add_argument('--calculation-type', default='md', help='Which calculation type to run')
     parser.add_argument('--max-steps', default=10, type=int, help='Maximum number of steps to run')
     args = parser.parse_args()
+
+    # Determine my hostname
+    hostname = node().strip('-0123456789')
+    print(f'Running on {hostname}')
 
     # Load the MOF list
     mofs = pd.read_csv('../data/qmof_database/qmof.csv')
@@ -180,12 +190,19 @@ which python
       EPS_SCF  1.0E-06
     &END OUTER_SCF
   &END SCF
+  &MGRID
+    ! CUTOFF 600
+    REL_CUTOFF [Ry] 60.0
+    COMMENSURATE TRUE
+    NGRIDS 5
+  &END MGRID
 &END DFT
 &END FORCE_EVAL""",
         basis_set_file='BASIS_MOLOPT',
         basis_set='DZVP-MOLOPT-SR-GTH',
         pseudo_potential='GTH-PBE',
         cutoff=1000 * units.Ry,
+        xc=None,
         uks=True,
         command=f'mpiexec -n {args.num_nodes * 4} --ppn 4 --cpu-bind depth --depth 8 -env OMP_NUM_THREADS=8 '
                 '/lus/grand/projects/CSC249ADCD08/cp2k/set_affinity_gpu_polaris.sh '
@@ -200,8 +217,8 @@ which python
     output_dir.mkdir(exist_ok=True)
     for name in mofs['qmof_id']:
         # Skip if we've already ran it
-        if len(old_runs) > 0 and len(
-                old_runs.query(f'num_nodes=={args.num_nodes} and name=="{name}" and run_type=="{args.calculation_type}" and max_steps=={args.max_steps}')) > 0:
+        if len(old_runs) > 0 and len(old_runs.query(f'num_nodes=={args.num_nodes} and name=="{name}" and run_type=="{args.calculation_type}" and max_steps=={args.max_steps}')) > 0:
+        #len(old_runs.query(f'num_nodes=={args.num_nodes} and name=="{name}" and run_type=="{args.calculation_type}" and max_steps=={args.max_steps} and hostname=="{hostname}"')) > 0:
             continue
 
         # Pull the relaxed structure
@@ -211,10 +228,12 @@ which python
 
         # Run it
         try:
-            traj, run_time = run_cp2k(name, cp2k_opts, atoms, args.calculation_type, args.max_steps, scratch_dir=Path('./tmp').resolve()).result()
+            traj, run_time, n_electrons = run_cp2k(name, cp2k_opts, atoms, args.calculation_type, args.max_steps, scratch_dir=Path('./tmp').resolve()).result()
         except ValueError:
             print(f'Failure for {name}')
             continue
+
+        # Cound the number of electrons
 
         # Save the output to the runtime directory and append the run summary to a JSON file
         with connect(output_dir / f'{name}-{args.calculation_type}-{args.max_steps}.db', append=False) as db:
@@ -224,10 +243,12 @@ which python
             print(json.dumps({
                 'name': name,
                 'composition': atoms.get_chemical_formula(),
-                'size': len(atoms),
+                'n_atoms': len(atoms),
+                'n_electrons': n_electrons,
                 'num_nodes': args.num_nodes,
                 'run_type': args.calculation_type,
                 'max_steps': args.max_steps,
                 'steps': len(traj),
+                'hostname': hostname,
                 'run_time': run_time
             }), file=fp)
