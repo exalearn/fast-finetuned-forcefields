@@ -8,9 +8,10 @@ import logging
 from ase.calculators.calculator import Calculator
 from ase.optimize.sciopt import SciPyFminBFGS
 from ase.io.trajectory import Trajectory
-import ase
+from tqdm import tqdm
 import numpy as np
 import math
+import ase
 
 import fff.sampling.mctbp.water_cluster_moves as mcm
 from fff.sampling.base import CalculatorBasedSampler
@@ -34,6 +35,7 @@ class MCTBP(CalculatorBasedSampler):
                  return_incomplete: bool = True,
                  return_minima_only: bool = False,
                  guesses_before_failure: int = 10000,
+                 progress_bar: bool = False,
                  scratch_dir: Path | None = None):
         """
 
@@ -47,6 +49,7 @@ class MCTBP(CalculatorBasedSampler):
             return_incomplete: Whether to return structures even if part of the sampling procedure fails
             return_minima_only: Whether to only return minima produced at each step
             guesses_before_failure: Number of attempts to find a new move before giving up
+            progress_bar: Whether to display a progress bar
             scratch_dir: Location in which to store temporary files
         """
         super().__init__(scratch_dir=scratch_dir)
@@ -58,6 +61,7 @@ class MCTBP(CalculatorBasedSampler):
         self.return_incomplete = return_incomplete
         self.return_minima_only = return_minima_only
         self.use_dsi = use_dsi
+        self.progress_bar = progress_bar
         self.guesses_before_failure = guesses_before_failure
 
     def _run_sampling(self, atoms: ase.Atoms, steps: int, calc: Calculator, **kwargs) -> (ase.Atoms, list[ase.Atoms]):
@@ -119,7 +123,7 @@ class MCTBP(CalculatorBasedSampler):
 
         # Loop over a set number of optimization steps
         new_cluster = opt_cluster.copy()  # Start with a copy of this initial structure
-        for i in range(steps):
+        for i in tqdm(range(steps), leave=False, disable=not self.progress_bar):
             # Start with a fresh copy of the initial cluster
             new_cluster = new_cluster.copy()
 
