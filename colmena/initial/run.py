@@ -431,7 +431,7 @@ class Thinker(BaseThinker):
                 self.logger.info('We have enough sampling tasks, reallocating resources to simulation')
                 self.rec.reallocate('sample', 'simulate', 1, block=False, callback=self.reallocating.clear)
             else:
-                self.logger.info('We have enough sampling task, reallocating resources to simulation')
+                self.logger.info('We have enough sampling tasks. Stopping for now')
                 self.rec.reallocate('sample', None, self.n_sampling_workers, block=False, callback=self.reallocating.clear)
         self.rec.release('sample', 1)
 
@@ -682,7 +682,7 @@ class Thinker(BaseThinker):
         node_count = 2 ** max(i for i, x in enumerate(self.node_size_map) if n_electrons > x)
         self.logger.info(f'Running on {node_count} nodes. Electron count={n_electrons}')
         if node_count > 1:
-            self.logger.info(f'Waiting for {node_count} more nodes to become available.')
+            self.logger.info(f'Waiting for {node_count - 1} more nodes to become available.')
             self.rec.acquire("simulate", node_count - 1)
 
         atoms.set_center_of_mass([0, 0, 0])
@@ -711,8 +711,11 @@ class Thinker(BaseThinker):
                 self.logger.info('Running low on simulation tasks. Reallocating to sampling')
                 self.rec.reallocate('simulate', 'sample', 1, block=False, callback=self.reallocating.clear)
             else:
-                self.logger.info('Running low on simulation tasks. Restarting sampling')
-                self.rec.reallocate(None, 'sample', self.n_sampling_workers)  # Should complete immediately
+                if self.rec.allocated_slots('sample') == 0:
+                    self.logger.info('Running low on simulation tasks. Restarting sampling')
+                    self.rec.reallocate(None, 'sample', self.n_sampling_workers)  # Should complete immediately
+                else:
+                    self.logger.info('Running low on simulation tasks. Sampling still under way')
         self.rec.release('simulate', result.resources.node_count)
 
         # Store the result in the database if successful
