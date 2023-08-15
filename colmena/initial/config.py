@@ -182,7 +182,7 @@ which python
     return config
 
 
-def perlmutter_nwchem(log_dir: str, qc_nodes: int = 32) -> Config:
+def perlmutter_nwchem(log_dir: str, qc_nodes: int = 128) -> Config:
     """Configuration which uses Perlmutter GPU for ML tasks and Perlmutter CPU to run MPI tasks
 
     Args:
@@ -203,14 +203,14 @@ def perlmutter_nwchem(log_dir: str, qc_nodes: int = 32) -> Config:
                     partition=None,  # 'debug'
                     account='m1513',
                     launcher=SimpleLauncher(),
-                    walltime='12:00:00',
+                    walltime='24:00:00',
                     nodes_per_block=qc_nodes,
                     init_blocks=0,
                     min_blocks=0,
                     max_blocks=1,
                     scheduler_options='''#SBATCH --image=ghcr.io/nwchemgit/nwchem-720.nersc.mpich4.mpi-pr:latest
 #SBATCH -C cpu
-#SBATCH --qos=regular''',
+#SBATCH --qos=preempt''',
                     worker_init='''
 module load python
 conda activate /global/cfs/cdirs/m1513/lward/fast-finedtuned-forcefields/env-cpu/
@@ -236,7 +236,7 @@ pwd''',
                     partition=None,  # 'debug'
                     account='m1513',
                     launcher=SrunLauncher(overrides="--gpus-per-node 4 -c 64"),
-                    walltime='12:00:00',
+                    walltime='1:00:00',
                     nodes_per_block=2,  # So that we have a total of 8 GPUs
                     init_blocks=0,
                     min_blocks=0,

@@ -13,7 +13,7 @@ init_model=$init_dir/best-models/dft_mctbp-25000_ttm-100k/avtz-starting-model
 search_space=../../notebooks/hydronet/structures-to-sample/small-clusters.db
 
 # Start from the database of the last run
-training_set=runs/mp2-mctbp-23Jul26-130500-164746/train.db
+training_set=runs/mp2-mctbp-23Jul27-133936-30280b/train.db
 
 # Test for the local system
 python run.py \
